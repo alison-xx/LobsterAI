@@ -142,7 +142,7 @@ export const OPENCLAW_MODEL_SELECTION_SCOPE = 'session';
 export const OPENCLAW_HEARTBEAT_EVERY_ENABLED = '1h';
 export const OPENCLAW_HEARTBEAT_EVERY_DISABLED = '0m';
 const DINGTALK_OPENCLAW_CHANNEL = 'dingtalk-connector';
-const OPENCLAW_MEMORY_CORE_PLUGIN_ID = 'memory-core';
+export const OPENCLAW_MEMORY_CORE_PLUGIN_ID = 'memory-core';
 const OPENCLAW_MODEL_COMPAT_PLUGIN_ID = 'lobsterai-model-compat';
 
 const asConfigRecord = (value: unknown): Record<string, unknown> | undefined => (
@@ -4101,10 +4101,13 @@ export class OpenClawConfigSync {
       gateway: {
         mode: 'local',
       },
-      // Don't enable plugins in minimal config — plugin loading via jiti happens
-      // synchronously BEFORE the HTTP server binds, and can block gateway startup
-      // for minutes on a fresh install.  Plugins will be enabled when the user
-      // configures an API model and a full config sync runs.
+      // Keep first-start discovery limited to bundled memory. Without a non-empty
+      // allowlist, inherited provider keys can trigger unrequested plugin installs
+      // and capability-consent failures before the gateway binds. Full config sync
+      // expands the allowlist once a model is configured.
+      plugins: {
+        allow: [OPENCLAW_MEMORY_CORE_PLUGIN_ID],
+      },
     };
 
     let currentContent = '';

@@ -280,6 +280,7 @@ import {
 import { registerSessionDiagnosticsHandlers } from './ipcHandlers/sessionDiagnostics';
 import { registerSiteIpcHandlers } from './ipcHandlers/site';
 import { registerSkillHandlers } from './ipcHandlers/skills';
+import { hasUnsafeWordEdits, registerWordEditingHandlers } from './ipcHandlers/wordEditing';
 import { LibraryIndexService } from './library/libraryIndexService';
 import { registerLibraryIpcHandlers } from './library/libraryIpc';
 import { LibraryLocalStore } from './library/libraryLocalStore';
@@ -13096,6 +13097,7 @@ if (!gotTheLock) {
   });
 
   registerMarkdownEditingHandlers(() => mainWindow);
+  registerWordEditingHandlers(() => mainWindow);
 
   // ---- artifact file watching ----
   const fileWatchers = new Map<
@@ -13584,11 +13586,16 @@ if (!gotTheLock) {
       }
 
       const devPort = process.env.ELECTRON_START_URL?.match(/:(\d+)/)?.[1] || '5175';
+      const appDocumentUrl = isDev ? new URL(DEV_SERVER_URL).href
+        : pathToFileURL(path.join(__dirname, '../dist/index.html')).href;
+      // Local Word shaping needs WASM compilation, without enabling JavaScript eval.
+      const wordWasmSource = details.url === appDocumentUrl && details.webContentsId === mainWindow?.webContents.id
+        ? " 'wasm-unsafe-eval'" : '';
       const cspDirectives = [
         "default-src 'self'",
         isDev
-          ? `script-src 'self' 'unsafe-inline' http://localhost:${devPort} ws://localhost:${devPort}`
-          : "script-src 'self'",
+          ? `script-src 'self'${wordWasmSource} 'unsafe-inline' http://localhost:${devPort} ws://localhost:${devPort}`
+          : `script-src 'self'${wordWasmSource}`,
         "style-src 'self' 'unsafe-inline' https:",
         `img-src 'self' data: blob: https: http: ${ArtifactPreviewProtocol.LocalFile}: ${SKIN_PRIVILEGED_SCHEME.scheme}:`,
         // 允许连接到所有域名，不做限制
@@ -14324,12 +14331,12 @@ if (!gotTheLock) {
 
     // User-initiated quit (Cmd+Q, app menu, Dock, tray): scheduled tasks and
     // IM replies stop with the app, so ask first.
-    void showAppQuitConfirmation(hasUnsafeMarkdownEdits)
+    void showAppQuitConfirmation(() => hasUnsafeMarkdownEdits() || hasUnsafeWordEdits())
       .then(
         confirmed => confirmed,
         error => {
-          if (hasUnsafeMarkdownEdits()) {
-            console.error('[Main] quit confirmation prompt failed, retaining unsaved Markdown edits:', error);
+          if (hasUnsafeMarkdownEdits() || hasUnsafeWordEdits()) {
+            console.error('[Main] quit confirmation prompt failed, retaining unsaved document edits:', error);
             return false;
           }
           // Honor the quit rather than trap the user in a process that cannot

@@ -9,6 +9,9 @@ import renderer from 'vite-plugin-electron-renderer';
 // PORT lets tooling (e.g. browser preview) assign a free port; electron:dev
 // pins 5175 via the --port CLI flag, which overrides server.port anyway.
 const devPort = Number(process.env.PORT ?? '') || 5175;
+// Keep production and development dependency transforms aligned with Electron.
+// The Word layout engine initializes HarfBuzz with top-level await.
+const rendererTarget = 'es2022';
 const katexVersion = process.env.npm_package_dependencies_katex?.replace(/^[~^]/, '') || '0.16.0';
 const pdfJsAssetRoot = path.resolve(__dirname, 'node_modules/pdfjs-dist');
 const pdfJsPublicPath = '/pdfjs/';
@@ -166,6 +169,7 @@ export default defineConfig({
     },
   },
   build: {
+    target: rendererTarget,
     outDir: 'dist',
     emptyOutDir: true,
     sourcemap: true,
@@ -195,6 +199,7 @@ export default defineConfig({
   optimizeDeps: {
     exclude: ['electron', '@larksuite/openclaw-lark-tools', '@larksuite/openclaw-lark'],
     esbuildOptions: {
+      target: rendererTarget,
       define: {
         __VERSION__: JSON.stringify(katexVersion),
       },

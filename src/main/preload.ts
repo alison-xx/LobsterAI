@@ -13,6 +13,7 @@ import { AppSettingsIpc } from '../shared/appSettings/constants';
 import { AppUpdateIpc } from '../shared/appUpdate/constants';
 import { ArtifactPreviewIpc } from '../shared/artifactPreview/constants';
 import { MarkdownFileIpc, type SaveMarkdownFileRequest } from '../shared/artifactPreview/markdownEditing';
+import { type WordFileBridge,WordFileIpc } from '../shared/artifactPreview/wordEditing';
 import {
   AsrIpcChannel,
   type AsrRealtimeSessionRequest,
@@ -1020,6 +1021,20 @@ contextBridge.exposeInMainWorld('electron', {
       ipcRenderer.invoke(AsrIpcChannel.CreateRealtimeSession, options),
   },
   artifact: {
+    word: {
+      open: filePath => ipcRenderer.invoke(WordFileIpc.Open, filePath),
+      read: sessionId => ipcRenderer.invoke(WordFileIpc.Read, sessionId),
+      checkpoint: request => ipcRenderer.invoke(WordFileIpc.Checkpoint, request),
+      save: request => ipcRenderer.invoke(WordFileIpc.Save, request),
+      discardDraft: sessionId => ipcRenderer.invoke(WordFileIpc.DiscardDraft, sessionId),
+      release: sessionId => ipcRenderer.invoke(WordFileIpc.Release, sessionId),
+      setHasUnsafeEdits: unsafe => ipcRenderer.send(WordFileIpc.SetUnsafeEdits, unsafe),
+      onChanged: listener => {
+        const handler = (_event: Electron.IpcRendererEvent, sessionId: string) => listener(sessionId);
+        ipcRenderer.on(WordFileIpc.Changed, handler);
+        return () => { ipcRenderer.removeListener(WordFileIpc.Changed, handler); };
+      },
+    } satisfies WordFileBridge,
     markdown: {
       read: (filePath: string) => ipcRenderer.invoke(MarkdownFileIpc.Read, filePath),
       save: (request: SaveMarkdownFileRequest) => ipcRenderer.invoke(MarkdownFileIpc.Save, request),

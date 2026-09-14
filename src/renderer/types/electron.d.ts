@@ -10,6 +10,7 @@ import type {
 } from '../../shared/activity/constants';
 import type { AppUpdateActiveWorkloads, AppUpdateCheckResult, AppUpdateRuntimeState } from '../../shared/appUpdate/constants';
 import type { MarkdownFileBridge } from '../../shared/artifactPreview/markdownEditing';
+import type { WordFileBridge } from '../../shared/artifactPreview/wordEditing';
 import type {
   AsrRealtimeSessionRequest,
   AsrRealtimeSessionResult,
@@ -1556,6 +1557,7 @@ interface IElectronAPI {
     createRealtimeSession: (options: AsrRealtimeSessionRequest) => Promise<AsrRealtimeSessionResult>;
   };
   artifact: {
+    word: WordFileBridge;
     markdown: MarkdownFileBridge;
     watchFile: (filePath: string) => Promise<void>;
     unwatchFile: (filePath: string) => Promise<void>;

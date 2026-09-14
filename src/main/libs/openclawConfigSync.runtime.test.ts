@@ -13,6 +13,7 @@ import { OpenClawSkillReviewMode } from '../../shared/openclawEngine/constants';
 import { OpenClawProviderId, ProviderName } from '../../shared/providers';
 import { DEFAULT_DISCORD_OPENCLAW_CONFIG, DEFAULT_QQ_CONFIG, DiscordDmPolicy } from '../im/types';
 import { OpenClawAgentOwnership } from './openclawAgentModels';
+import { OPENCLAW_MEMORY_CORE_PLUGIN_ID } from './openclawConfigSync';
 import { OpenClawQQPlugin, QQ_APPROVALS_DISABLED } from './openclawQQConfig';
 
 vi.mock('electron', () => ({
@@ -265,10 +266,33 @@ describe('OpenClawConfigSync runtime config output', () => {
     const { meta: _meta, ...config } = JSON.parse(fs.readFileSync(configPath, 'utf8'));
     expect(config).toEqual({
       gateway: { mode: 'local' },
+      plugins: { allow: [OPENCLAW_MEMORY_CORE_PLUGIN_ID] },
       skills: { workshop: { autonomous: { mode: OpenClawSkillReviewMode.Off } } },
       agents: { defaults: { compaction: { memoryFlush: { enabled: false } } } },
     });
     expect(sync.sync('repeat-start')).toMatchObject({ ok: true, changed: false });
+  });
+
+  test.each([
+    JSON.stringify({ gateway: { mode: 'local' } }),
+    '{ invalid json',
+  ])('adds the first-start plugin allowlist to an existing minimal or invalid config: %s', async (content) => {
+    fs.writeFileSync(configPath, content);
+    const apiConfig = mockRuntimeState.rawApiConfig.config;
+    mockRuntimeState.rawApiConfig.config = null;
+    const sync = await createSync();
+
+    expect(sync.sync('no-model')).toMatchObject({ ok: true, changed: true });
+    const minimal = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+    expect(minimal.plugins).toEqual({ allow: [OPENCLAW_MEMORY_CORE_PLUGIN_ID] });
+    expect(sync.sync('repeat-start')).toMatchObject({ ok: true, changed: false });
+
+    mockRuntimeState.rawApiConfig.config = apiConfig;
+    expect(sync.sync('model-configured')).toMatchObject({ ok: true, changed: true });
+    const configured = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+    expect(configured.plugins.allow).toContain(OPENCLAW_MEMORY_CORE_PLUGIN_ID);
+    expect(configured.plugins.allow).toContain(OpenClawQQPlugin.Id);
+    expect(configured.models.providers).not.toEqual({});
   });
 
   test('still removes plugin-index-managed installs when no model is available', async () => {
