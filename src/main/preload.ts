@@ -558,6 +558,7 @@ contextBridge.exposeInMainWorld('electron', {
       agentId?: string;
       modelOverride?: string;
       thinkingLevel?: string;
+      localInput?: import('../shared/cowork/inputAttachments').CoworkLocalInput;
       imageAttachments?: Array<{ name: string; mimeType: string; base64Data: string; sizeBytes?: number; localPath?: string; previewMimeType?: string; previewBase64Data?: string }>;
       mediaSelection?: { mode: string; modelId?: string; modelName?: string; imageModelId?: string; videoModelId?: string }; mediaReferences?: Array<{ token: string; mediaType: string; index: number; fileId: string; fileName: string; mimeType: string; localPath?: string; remoteUrl?: string; dataUrl?: string; role?: string }>;
     }) => ipcRenderer.invoke('cowork:session:start', options),
@@ -572,6 +573,7 @@ contextBridge.exposeInMainWorld('electron', {
       resolvedKitCapabilities?: ResolvedKitCapabilities;
       selectedTextSnippets?: Array<{ id: string; text: string; sourceMessageId?: string; sourceMessageType?: 'assistant' | 'artifact_markdown' | 'artifact_text'; sourceId?: string; sourceType?: 'assistant' | 'artifact_markdown' | 'artifact_text'; sourceTitle?: string; sourcePath?: string; artifactId?: string; createdAt: number; startOffset?: number; endOffset?: number }>;
       browserAnnotations?: CoworkBrowserAnnotationMessageBatch[];
+      localInput?: import('../shared/cowork/inputAttachments').CoworkLocalInput;
       imageAttachments?: Array<{ name: string; mimeType: string; base64Data: string; sizeBytes?: number; localPath?: string; previewMimeType?: string; previewBase64Data?: string }>;
       mediaSelection?: { mode: string; modelId?: string; modelName?: string; imageModelId?: string; videoModelId?: string };
       mediaReferences?: Array<{

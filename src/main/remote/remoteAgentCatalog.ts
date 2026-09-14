@@ -32,7 +32,8 @@ export const remoteAgentFailure = (detail: string): RemoteAgentError => new Remo
 /** A device publishes one bounded, durable snapshot; workspace aliases are never repointed. */
 export class RemoteAgentCatalog {
   constructor(private readonly store: RemoteStore, private readonly ownership: AgentOwnerStore,
-    private readonly getWorkspace: (agentId: string) => Promise<AgentWorkspace> | AgentWorkspace) {}
+    private readonly getWorkspace: (agentId: string) => Promise<AgentWorkspace> | AgentWorkspace,
+    private readonly getDefaultInput?: (owner: RemoteOwner, deviceId: string, agentId: string) => RemoteAgentCatalogItem['defaultInput']) {}
   private key(owner: RemoteOwner, deviceId: string): string { return `agentCatalog:${JSON.stringify([owner.userId, owner.scopeKey, deviceId])}`; }
   private workspaceKey(owner: RemoteOwner, deviceId: string, agentId: string): string { return `agentWorkspaces:${JSON.stringify([owner.userId, owner.scopeKey, deviceId, agentId])}`; }
   private row(agentId: string): AgentRow | undefined { return this.store.db.prepare('SELECT id,name,icon,enabled FROM agents WHERE id=?').get(agentId) as AgentRow | undefined; }
@@ -85,7 +86,9 @@ export class RemoteAgentCatalog {
       });
       const summary = this.agentSummary(identity.agentId, owner)!;
       const row = this.row(identity.agentId)!;
+      const defaultInput = this.getDefaultInput?.(owner, deviceId, identity.agentId);
       items.push({ agentId: summary.agentId, name: summary.name, icon: summary.icon, kind: summary.kind as 'default' | 'owned', version: summary.version,
+        ...(defaultInput ? { defaultInput } : {}),
         enabled: Boolean(row.enabled), defaultWorkspaceId: binding?.workspaceId || null, workspaceAvailable: available,
         unavailableReason: !row.enabled ? RemoteAgentReason.Disabled : !available ? RemoteAgentReason.WorkspaceUnavailable : null });
     }

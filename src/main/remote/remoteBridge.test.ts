@@ -116,6 +116,160 @@ describe('ownership association synchronization', () => {
   });
 });
 
+describe('session synchronization recovery', () => {
+  const bridges: RemoteBridge[] = [];
+  afterEach(() => { for (const bridge of bridges.splice(0)) bridge.stop(); vi.restoreAllMocks(); });
+
+  function syncing(beginCommitted = false) {
+    const value = fixture();
+    const { bridge, store, requestApi } = value;
+    bridges.push(bridge); store.setWake(() => {}); store.setEnabledOwner(owner);
+    store.transaction(() => {
+      store.db.prepare("INSERT INTO cowork_sessions VALUES ('sync-task','History',1,1,'idle')").run();
+      store.assignNew('sync-task', owner, 'local_create');
+    });
+    store.snapshot('sync-task');
+    const warning = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    requestApi.mockImplementation(async (_owner, pathname) => {
+      const saved = store.get<any>('import:sync-task')!;
+      const receipt = { sessionId: saved.sessionId, committedSourceSeq: saved.baseSourceSeq, committedSeq: '1', stateVersion: '1' };
+      let data: any;
+      if (pathname.endsWith('/sync/imports')) data = { ...receipt, state: beginCommitted ? 'committed' : 'uploading' };
+      else if (pathname.endsWith('/commit')) data = { ...receipt, state: 'committed' };
+      else if (pathname.includes('/parts/')) data = {};
+      else throw new Error(`Unexpected synchronization request ${pathname}`);
+      return new Response(JSON.stringify({ code: 0, message: 'success', data }));
+    });
+    return { ...value, warning };
+  }
+
+  function acknowledgeSnapshot(store: RemoteStore): void {
+    const snapshot = store.snapshot('sync-task');
+    const row = store.sync('sync-task')!;
+    store.bindRemote('sync-task', row.session_id, 'desktop');
+    store.acknowledge('sync-task', 'desktop', row.session_id, snapshot.baseSourceSeq, '1', true, snapshot.snapshotEpoch);
+  }
+
+  it('clears a failed import after a later commit and logs no sensitive error content', async () => {
+    const { bridge, store, requestApi, warning } = syncing();
+    const secret = 'private conversation and device credential';
+    requestApi.mockRejectedValueOnce(new RemoteApiError(47019, secret, { reason: 'EXECUTION_FAILED', accessToken: secret }, 409));
+    await bridge.syncSessions();
+    const failure = store.get<any>('syncFailure:sync-task');
+    expect(failure.code).toBe(47019);
+    expect(store.get('import:sync-task')).not.toBeNull();
+    expect(bridge.associationSyncState({ kind: OwnershipTargetKind.Task, id: 'sync-task' })).toBe(OwnershipSyncState.Failed);
+    expect(bridge.state().error).toBe('Some conversations need synchronization recovery');
+    expect(warning).toHaveBeenCalledTimes(1);
+    expect(JSON.stringify(warning.mock.calls)).not.toContain(secret);
+    expect(JSON.stringify(warning.mock.calls)).not.toContain('accessToken');
+    store.put('syncFailure:sync-task', { ...failure, retryAt: 0 });
+
+    await bridge.syncSessions();
+    expect(store.get('syncFailure:sync-task')).toBeNull();
+    expect(store.get('import:sync-task')).toBeNull();
+    expect(store.pending('sync-task')).toEqual([]);
+    expect(bridge.associationSyncState({ kind: OwnershipTargetKind.Task, id: 'sync-task' })).toBe(OwnershipSyncState.Synced);
+    expect(bridge.state().error).toBeUndefined();
+  });
+
+  it('clears a previous failure when begin returns an already committed import', async () => {
+    const { bridge, store, requestApi } = syncing(true);
+    requestApi.mockRejectedValueOnce(new RemoteApiError(47019, 'Begin acknowledgement was lost'));
+    await bridge.syncSessions();
+    const saved = store.get<any>('import:sync-task');
+    store.put('syncFailure:sync-task', { code: 47019, retryAt: 0 });
+
+    await bridge.syncSessions();
+    expect(requestApi).toHaveBeenCalledTimes(2);
+    expect(requestApi.mock.calls.every(call => call[1].endsWith('/sync/imports'))).toBe(true);
+    expect(store.sync('sync-task')!.ack_seq).toBe(Number(saved.baseSourceSeq));
+    expect(store.get('syncFailure:sync-task')).toBeNull();
+    expect(store.get('import:sync-task')).toBeNull();
+    expect(bridge.associationSyncState({ kind: OwnershipTargetKind.Task, id: 'sync-task' })).toBe(OwnershipSyncState.Synced);
+    expect(bridge.state().error).toBeUndefined();
+  });
+
+  for (const failureAt of ['commit', 'ack'] as const) it(`preserves the failed import and outbox when ${failureAt} fails`, async () => {
+    const { bridge, store, requestApi } = syncing();
+    const successfulRequest = requestApi.getMockImplementation()!;
+    requestApi.mockImplementation(async (actor, pathname, init) => {
+      if (pathname.endsWith('/commit')) {
+        if (failureAt === 'commit') throw new RemoteApiError(47025, 'Commit baseline changed');
+        return new Response(JSON.stringify({ code: 0, data: { committedSourceSeq: '999', committedSeq: '1' } }));
+      }
+      return successfulRequest(actor, pathname, init);
+    });
+    store.put('syncFailure:sync-task', { code: 47019, retryAt: 0 });
+    const pending = store.pending('sync-task');
+    const before = store.sync('sync-task')!;
+    if (failureAt === 'ack') await expect(bridge.syncSessions()).rejects.toThrow('Remote ACK outside durable local bounds');
+    else await bridge.syncSessions();
+
+    expect(store.get<any>('syncFailure:sync-task')?.code).toBe(failureAt === 'commit' ? 47025 : 47019);
+    expect(store.get<any>('import:sync-task')?.beginConfirmed).toBe(true);
+    expect(store.pending('sync-task')).toEqual(pending);
+    expect(store.sync('sync-task')!.ack_seq).toBe(before.ack_seq);
+    expect(store.sync('sync-task')!.needs_snapshot).toBe(1);
+    expect(bridge.associationSyncState({ kind: OwnershipTargetKind.Task, id: 'sync-task' })).toBe(OwnershipSyncState.Failed);
+  });
+
+  it('repairs an old failure marker on an acknowledged task before its retry deadline', async () => {
+    const { bridge, store, requestApi } = syncing();
+    acknowledgeSnapshot(store);
+    bridge.error = 'Some conversations need synchronization recovery';
+    store.put('syncFailure:sync-task', { code: 47019, retryAt: Date.now() + 60000 });
+
+    await bridge.syncSessions();
+    expect(requestApi).not.toHaveBeenCalled();
+    expect(store.get('syncFailure:sync-task')).toBeNull();
+    expect(bridge.associationSyncState({ kind: OwnershipTargetKind.Task, id: 'sync-task' })).toBe(OwnershipSyncState.Synced);
+    expect(bridge.state().error).toBeUndefined();
+  });
+
+  it('retains the synchronization summary while another owned task still has a failure', async () => {
+    const { bridge, store, requestApi } = syncing();
+    acknowledgeSnapshot(store);
+    store.transaction(() => {
+      store.db.prepare("INSERT INTO cowork_sessions VALUES ('other-task','Other',1,1,'idle')").run();
+      store.assignNew('other-task', owner, 'local_create');
+    });
+    const failure = { code: 47019, retryAt: Date.now() + 60000 };
+    store.put('syncFailure:sync-task', failure);
+    store.put('syncFailure:other-task', failure);
+    bridge.error = 'Some conversations need synchronization recovery';
+
+    await bridge.syncSessions();
+    expect(requestApi).not.toHaveBeenCalled();
+    expect(store.get('syncFailure:sync-task')).toBeNull();
+    expect(store.get('syncFailure:other-task')).toEqual(failure);
+    expect(bridge.state().error).toBe('Some conversations need synchronization recovery');
+  });
+
+  for (const pendingState of ['snapshot', 'source', 'dirty', 'import', 'outbox', 'device'] as const) {
+    it(`keeps an old failure marker while ${pendingState} still needs recovery`, async () => {
+      const { bridge, store, requestApi } = syncing();
+      acknowledgeSnapshot(store);
+      if (pendingState === 'snapshot') store.requireSnapshot('sync-task');
+      if (pendingState === 'source') store.db.prepare('UPDATE remote_sync SET source_seq=source_seq+1 WHERE local_id=?').run('sync-task');
+      if (pendingState === 'dirty') {
+        // Keep queued dirt visible while isolating the failure cleanup guard from admission transactions.
+        vi.spyOn(bridge, 'ownershipSyncBlocked').mockReturnValue(false);
+        store.db.prepare('INSERT INTO remote_dirty VALUES (?)').run('sync-task');
+      }
+      if (pendingState === 'import') store.put('import:sync-task', { importId: 'pending' });
+      if (pendingState === 'outbox') store.db.prepare('INSERT INTO remote_outbox VALUES (?,1,?)').run('sync-task', JSON.stringify({ sourceSeq: '1' }));
+      if (pendingState === 'device') store.bindRemote('sync-task', store.sync('sync-task')!.session_id, 'other-device');
+      const failure = { code: 47019, retryAt: Date.now() + 60000 };
+      store.put('syncFailure:sync-task', failure);
+
+      await bridge.syncSessions();
+      expect(requestApi).not.toHaveBeenCalled();
+      expect(store.get('syncFailure:sync-task')).toEqual(failure);
+    });
+  }
+});
+
 describe('command execution safety', () => {
   it('durably prepares before received ACK and dispatches only once across duplicate claims', async () => {
     const { bridge, execute, store, calls } = fixture();

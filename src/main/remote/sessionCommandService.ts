@@ -1,18 +1,23 @@
 import { AsyncLocalStorage } from 'async_hooks';
+import { randomUUID } from 'crypto';
 import { statSync } from 'fs';
 import { resolve } from 'path';
 
 import { AgentId, AgentOwnerKind } from '../../shared/agent/constants';
 import type { ApprovalDecisionOutcome, ApprovalState } from '../../shared/cowork/approval';
+import { parseModelThinkingLevel } from '../../shared/providers/modelThinking';
 import type { RemoteOwner } from '../../shared/remote/constants';
+import { RemoteInputReason } from '../../shared/remote/input';
 import type { CoworkStore } from '../coworkStore';
 import { t } from '../i18n';
 import type { CoworkRuntime, PermissionRequest } from '../libs/agentEngine/types';
 import { type OwnershipOperationGate, ownershipOperationGate } from '../ownershipOperationGate';
 import { payloadHash, sameOwner } from './canonical';
+import type { InputPreparationService, LocalPreparedInput } from './inputPreparationService';
 import { RemoteAgentError, remoteAgentFailure } from './remoteAgentCatalog';
 import { RemoteApprovalError } from './remoteApproval';
 import type { InboxEntry, RemoteCommand } from './remoteBridge';
+import { RemoteInputError, type RemoteModelCatalog } from './remoteModelCatalog';
 
 interface ExecutionContext { owner: RemoteOwner | null; preparedSessionId?: string; runId?: string; commandId?: string; stillPermitted?: () => boolean; assertAgentBinding?: () => void }
 const context = new AsyncLocalStorage<ExecutionContext>();
@@ -33,6 +38,59 @@ const terminal = new Set(['succeeded', 'failed', 'cancelled', 'interrupted']);
 /** All local/mobile submissions pass this account fence and per-session control lane. */
 export class SessionCommandService {
   private readonly submitting = new Set<string>();
+  private readonly configurationLane = new Map<string, string>();
+  private input: { preparations: InputPreparationService; models: RemoteModelCatalog; getDeviceId(): string | undefined } | null = null;
+  configureInput(input: NonNullable<SessionCommandService['input']>): void { this.input = input; }
+  recordCurrentInputModel(sessionId: string): Record<string, unknown> | null {
+    const actor = this.getOwner(); const deviceId = this.input?.getDeviceId();
+    if (!actor || !deviceId || !sameOwner(this.store.remote.owner(sessionId), actor)) return null;
+    try {
+      const session = this.store.getSession(sessionId, 0);
+      if (!session) return null;
+      const runtimeRef = session.modelOverride || this.store.getAgent(session.agentId)?.model || '';
+      const item = this.input!.models.resolveRuntime(actor, deviceId, runtimeRef).item;
+      const summary = { modelRef: item.modelRef, version: item.version, source: item.source, displayName: item.displayName,
+        providerLabel: item.providerLabel, thinkingLevel: session.thinkingLevel || null };
+      this.store.remote.inputVersion(sessionId); this.store.remote.put(`inputModel:${sessionId}`, summary); return summary;
+    } catch { return null; }
+  }
+  private preparedInput(command: RemoteCommand, owner: RemoteOwner): LocalPreparedInput | null {
+    if (command.request.inputSchemaVersion !== 2) return null;
+    if (!this.input) throw new RemoteInputError(RemoteInputReason.Invalid);
+    const prepared = this.input.preparations.read(command.request.payload.inputPreparationId, owner, this.input.getDeviceId() || '');
+    if (prepared.inputDigest !== command.request.payload.inputDigest || payloadHash(command.request.payload.resolvedInput) !== prepared.inputDigest) throw new RemoteInputError(RemoteInputReason.Stale);
+    return prepared;
+  }
+  private inputModel(prepared: LocalPreparedInput): Record<string, unknown> {
+    const item = this.input!.models.resolve(prepared.owner, prepared.deviceId, prepared.resolvedInput.model.modelRef, prepared.resolvedInput.model.version).item;
+    return { modelRef: item.modelRef, version: item.version, source: item.source, displayName: item.displayName, providerLabel: item.providerLabel,
+      thinkingLevel: prepared.resolvedInput.options.thinkingLevel || null };
+  }
+  async patchConfiguration(sessionId: string, patch: Parameters<CoworkRuntime['patchSession']>[1]): Promise<any> {
+    const actor = this.getOwner();
+    const generation = this.ownershipOptions.getGeneration?.();
+    this.store.remote.assertActor(sessionId, actor);
+    const run = this.store.remote.run(sessionId);
+    if (this.submitting.has(sessionId) || this.configurationLane.has(sessionId) || this.store.remote.get(`inputFence:${sessionId}`)
+      || run && !terminal.has(run.status)) throw new RemoteInputError(RemoteInputReason.Busy);
+    const token = randomUUID(); this.configurationLane.set(sessionId, token);
+    const check = (): void => {
+      if (generation !== this.ownershipOptions.getGeneration?.() || (actor ? !sameOwner(actor, this.getOwner()) : this.getOwner() !== null)) throw new RemoteInputError(RemoteInputReason.Account);
+      this.store.remote.assertActor(sessionId, actor);
+    };
+    try {
+      check(); this.store.remote.inputVersion(sessionId);
+      this.store.remote.put(`inputFence:${sessionId}`, { operationId: token, phase: 'model_applying' });
+      const result = await this.runtime.patchSession(sessionId, patch);
+      check();
+      this.store.updateSession(sessionId, {
+        ...(patch.model !== undefined ? { modelOverride: result && typeof result.modelOverride === 'string' ? result.modelOverride : patch.model ?? '' } : {}),
+        ...(patch.thinkingLevel !== undefined ? { thinkingLevel: parseModelThinkingLevel(patch.thinkingLevel) || '' } : {}),
+      }, { touchUpdatedAt: false });
+      this.store.remote.inputVersion(sessionId); this.recordCurrentInputModel(sessionId); this.store.remote.remove(`inputFence:${sessionId}`);
+      return result;
+    } finally { this.configurationLane.delete(sessionId); }
+  }
   private startHandler: ((options: any) => Promise<any>) | null = null;
   private continueHandler: ((options: any) => Promise<any>) | null = null;
   constructor(private readonly store: CoworkStore, private readonly runtime: CoworkRuntime, private readonly getOwner: () => RemoteOwner | null,
@@ -75,7 +133,7 @@ export class SessionCommandService {
     const id = create ? inherited?.preparedSessionId : options.sessionId;
     if (id) {
       this.store.remote.assertActor(id, actor);
-      if (this.submitting.has(id)) return { success: false, error: 'REMOTE_SESSION_BUSY' };
+      if (this.submitting.has(id) || this.configurationLane.has(id) && this.configurationLane.get(id) !== inherited?.commandId || this.store.remote.get(`inputFence:${id}`)) return { success: false, error: 'REMOTE_SESSION_BUSY' };
       const run = this.store.remote.run(id);
       if (run && !terminal.has(run.status) && run.runId !== inherited?.runId) return { success: false, error: 'REMOTE_SESSION_BUSY' };
     }
@@ -122,22 +180,25 @@ export class SessionCommandService {
   }
   prepare(command: RemoteCommand, owner: RemoteOwner, workspace: string | null): { localSessionId: string; remoteSessionId: string; runId: string | null } {
     const request = command.request;
+    const preparedInput = this.preparedInput(command, owner);
+    const payload = preparedInput ? preparedInput.resolvedInput : request.payload;
+    if (preparedInput) this.input!.preparations.validate(preparedInput, owner, preparedInput.deviceId, true);
     let localId: string;
     if (command.type === 'create_session') {
       if (!workspace) throw new Error('Workspace unavailable');
-      const explicit = request.payload.agentId !== undefined || request.payload.expectedAgentVersion !== undefined;
-      if (explicit && (typeof request.payload.agentId !== 'string' || typeof request.payload.expectedAgentVersion !== 'string'
-        || !/^[1-9]\d*$/u.test(request.payload.expectedAgentVersion))) throw new RemoteAgentError(47019, 'COMMAND_INVALID', 'INVALID_AGENT_TARGET');
-      const agentId = explicit ? request.payload.agentId : AgentId.Main;
-      this.validateAgent(agentId, owner, explicit ? request.payload.expectedAgentVersion : undefined, explicit);
+      const explicit = payload.agentId !== undefined || payload.expectedAgentVersion !== undefined;
+      if (explicit && (typeof payload.agentId !== 'string' || typeof payload.expectedAgentVersion !== 'string'
+        || !/^[1-9]\d*$/u.test(payload.expectedAgentVersion))) throw new RemoteAgentError(47019, 'COMMAND_INVALID', 'INVALID_AGENT_TARGET');
+      const agentId = explicit ? payload.agentId : AgentId.Main;
+      this.validateAgent(agentId, owner, explicit && !preparedInput ? payload.expectedAgentVersion : undefined, explicit);
       if (explicit) this.validateDirectory(workspace);
       const config = this.store.getConfig();
-      const session = this.store.createSession(request.payload.text.slice(0, 100), workspace, config.systemPrompt, 'local', [], agentId, '', { owner, ownershipSource: 'remote_command' });
+      const session = this.store.createSession((payload.text.trim() || payload.attachments?.[0]?.fileName || t('coworkDefaultSessionTitle')).slice(0, 100), workspace, config.systemPrompt, 'local', [], agentId, preparedInput?.runtimeRef || '', { owner, ownershipSource: 'remote_command', ...(preparedInput ? { thinkingLevel: parseModelThinkingLevel(preparedInput.resolvedInput.options.thinkingLevel) || '' } : {}) });
       localId = session.id;
-      this.store.remote.put(`agentExecution:${command.commandId}`, { agentId, version: explicit ? request.payload.expectedAgentVersion : null,
-        workspaceId: request.payload.workspaceId || null, cwd: resolve(workspace) });
+      this.store.remote.put(`agentExecution:${command.commandId}`, { agentId, version: explicit ? payload.expectedAgentVersion : null,
+        workspaceId: payload.workspaceId || null, cwd: resolve(workspace) });
       this.store.remote.put(`origin:${localId}`, 'mobile');
-      this.store.remote.put(`workspace:${localId}`, request.payload.workspaceId || null);
+      this.store.remote.put(`workspace:${localId}`, payload.workspaceId || null);
       if (!command.sessionId) throw new Error('Server session mapping is required');
       const remoteId = command.sessionId;
       this.store.remote.bindRemote(localId, remoteId, '');
@@ -153,14 +214,18 @@ export class SessionCommandService {
         this.validateDirectory(session.cwd);
       }
     }
-    if (this.submitting.has(localId)) throw new Error('REMOTE_SESSION_BUSY');
+    if (this.submitting.has(localId) || this.configurationLane.has(localId) || this.store.remote.get(`inputFence:${localId}`)) throw new Error('REMOTE_SESSION_BUSY');
     if (command.type === 'send_message' && request.expectedControlVersion !== this.store.remote.controlVersion(localId)) throw new Error('REMOTE_CONTROL_CONFLICT');
+    if (preparedInput) {
+      if (command.type === 'send_message' && request.expectedInputVersion !== this.store.remote.inputVersion(localId)) throw new RemoteInputError(RemoteInputReason.Version);
+      this.input!.preparations.bind(preparedInput, command.commandId);
+    }
     let runId = this.store.remote.run(localId)?.runId || null;
     if (['create_session', 'send_message'].includes(command.type)) {
       if (!command.runId) throw new Error('Server run mapping is required');
       runId = this.store.remote.beginRun(localId, command.runId, command.commandId).runId;
     }
-    if (['cancel_run', 'approval_response'].includes(command.type) && request.payload.runId !== runId) throw new Error('Run changed');
+    if (['cancel_run', 'approval_response'].includes(command.type) && payload.runId !== runId) throw new Error('Run changed');
     return { localSessionId: localId, remoteSessionId: this.store.remote.sync(localId)!.session_id, runId };
   }
   async execute(entry: InboxEntry, stillPermitted: () => boolean = () => false): Promise<any> {
@@ -168,23 +233,26 @@ export class SessionCommandService {
     this.store.remote.assertActor(entry.localSessionId, entry.owner);
     const localId = entry.localSessionId;
     const request = entry.command.request;
+    const preparedInput = this.preparedInput(entry.command, entry.owner);
+    const payload = preparedInput ? preparedInput.resolvedInput : request.payload;
     const session = this.store.getSession(localId, 0);
     const startsRun = ['create_session', 'send_message'].includes(entry.command.type);
     const binding = this.store.remote.get<{ agentId: string; version: string | null; cwd: string; workspaceId: string | null }>(`agentExecution:${entry.command.commandId}`);
-    const explicit = entry.command.type === 'create_session' && request.payload.agentId !== undefined;
+    const explicit = entry.command.type === 'create_session' && payload.agentId !== undefined;
     const fixedAgentId = session?.agentId || AgentId.Main;
     const fixedCwd = session?.cwd;
     const assertBinding = (): void => {
       if (!startsRun) return;
+      if (preparedInput) this.input!.preparations.validate(preparedInput, entry.owner, preparedInput.deviceId, true);
       if (!session || !sameOwner(this.store.remote.owner(localId), entry.owner)) throw remoteAgentFailure('NOT_SELECTABLE');
       const current = this.store.getSession(localId, 0);
       if (!current || (current.agentId || AgentId.Main) !== fixedAgentId || current.cwd !== fixedCwd) throw remoteAgentFailure('BINDING_MISMATCH');
       if (entry.command.type === 'create_session') {
-        const requested = request.payload.agentId || AgentId.Main;
+        const requested = payload.agentId || AgentId.Main;
         if (requested !== fixedAgentId || explicit && (!binding || binding.agentId !== requested
-          || binding.version !== request.payload.expectedAgentVersion || binding.workspaceId !== request.payload.workspaceId || binding.cwd !== resolve(current.cwd))) throw remoteAgentFailure('BINDING_MISMATCH');
+          || binding.version !== payload.expectedAgentVersion || binding.workspaceId !== payload.workspaceId || binding.cwd !== resolve(current.cwd))) throw remoteAgentFailure('BINDING_MISMATCH');
       }
-      this.validateAgent(fixedAgentId, entry.owner, explicit ? request.payload.expectedAgentVersion : undefined, explicit);
+      this.validateAgent(fixedAgentId, entry.owner, explicit && !preparedInput ? payload.expectedAgentVersion : undefined, explicit);
       if (explicit || entry.command.type === 'send_message') this.validateDirectory(current.cwd);
     };
     let bindingFailure: RemoteAgentError | undefined;
@@ -196,8 +264,41 @@ export class SessionCommandService {
     try {
     const result = await context.run({ owner: entry.owner, preparedSessionId: localId, runId: entry.runId || undefined, commandId: entry.command.commandId, stillPermitted, assertAgentBinding }, async () => {
       assertRemoteExecutionPermit();
-      if (entry.command.type === 'create_session') return this.startHandler!({ prompt: request.payload.text, cwd: fixedCwd, agentId: fixedAgentId });
-      if (entry.command.type === 'send_message') return this.continueHandler!({ prompt: request.payload.text, sessionId: localId });
+      if (preparedInput) {
+        if (this.configurationLane.has(localId) || this.submitting.has(localId) || this.store.remote.get(`inputFence:${localId}`)) throw new RemoteInputError(RemoteInputReason.Busy);
+        this.configurationLane.set(localId, entry.command.commandId);
+        try {
+          const options = await this.input!.preparations.executionOptions(preparedInput, assertRemoteExecutionPermit);
+          assertRemoteExecutionPermit();
+          const beforeVersion = this.store.remote.inputVersion(localId);
+          if (entry.command.type === 'send_message' && request.expectedInputVersion !== beforeVersion) throw new RemoteInputError(RemoteInputReason.Version);
+          if (entry.command.type === 'send_message') {
+            this.store.remote.put(`inputFence:${localId}`, { operationId: entry.command.commandId, phase: 'model_applying', beforeVersion });
+            await this.runtime.patchSession(localId, { model: options.modelOverride, thinkingLevel: options.thinkingLevel || null });
+            // A confirmed patch remains a fact even if the send permit expires during the await.
+            if (!sameOwner(entry.owner, this.getOwner())) throw new Error('Account changed during model application');
+            this.store.updateSession(localId, { modelOverride: options.modelOverride, thinkingLevel: parseModelThinkingLevel(options.thinkingLevel) || '' }, { touchUpdatedAt: false });
+          }
+          const afterVersion = this.store.remote.inputVersion(localId);
+          const inputModel = this.inputModel(preparedInput);
+          this.store.remote.transaction(() => {
+            this.store.remote.put(`inputOperation:${entry.command.commandId}`, { phase: 'model_applied', beforeVersion, afterVersion });
+            this.store.remote.put(`inputModel:${localId}`, inputModel);
+            this.store.remote.put(`inputRun:${entry.runId}`, { input: preparedInput.resolvedInput, inputModel });
+            this.store.remote.remove(`inputFence:${localId}`);
+            this.store.remote.db.prepare('INSERT OR IGNORE INTO remote_dirty VALUES (?)').run(localId);
+          });
+          if (!stillPermitted()) throw new RemoteInputError(RemoteInputReason.Expired);
+          assertRemoteExecutionPermit();
+          const submitted = entry.command.type === 'create_session'
+            ? await this.startHandler!({ ...options, cwd: fixedCwd, agentId: fixedAgentId })
+            : await this.continueHandler!({ ...options, sessionId: localId });
+          if (!submitted?.success) throw new RemoteInputError(RemoteInputReason.Invalid);
+          return submitted;
+        } finally { this.configurationLane.delete(localId); }
+      }
+      if (entry.command.type === 'create_session') return this.startHandler!({ prompt: payload.text, cwd: fixedCwd, agentId: fixedAgentId });
+      if (entry.command.type === 'send_message') return this.continueHandler!({ prompt: payload.text, sessionId: localId });
       if (entry.command.type === 'cancel_run') {
         const currentRun = this.store.remote.run(localId);
         if (!currentRun || currentRun.runId !== entry.runId) return { success: true, alreadyTerminal: true };

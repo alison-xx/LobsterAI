@@ -28,6 +28,7 @@ import {
 import { CoworkOnboardingMessageKind } from '../../../shared/cowork/constants';
 import { CoworkGoalStatus } from '../../../shared/cowork/goal';
 import type { CoworkImageAttachmentPreview } from '../../../shared/cowork/imageAttachments';
+import type { CoworkLocalInput } from '../../../shared/cowork/inputAttachments';
 import {
   COWORK_RAIL_TOOLTIP_PREVIEW_MAX_LENGTH,
   type CoworkMessageRailIndexItem,
@@ -218,6 +219,7 @@ interface CoworkSessionDetailProps {
     selectedTextSnippets?: CoworkSelectedTextSnippet[],
     browserAnnotations?: import('@shared/cowork/browserAnnotations').CoworkBrowserAnnotationMessageBatch[],
     collaborationMode?: CoworkCollaborationModeType,
+    localInput?: CoworkLocalInput,
   ) => boolean | void | Promise<boolean | void>;
   onStop: () => void;
   isSidebarCollapsed?: boolean;

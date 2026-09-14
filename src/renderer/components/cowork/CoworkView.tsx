@@ -6,6 +6,7 @@ import { useDispatch, useSelector } from 'react-redux';
 import { buildGoalSettingMessageMetadata } from '../../../common/goalCommandDisplay';
 import { buildSessionTitleFromInput } from '../../../common/sessionTitle';
 import { buildCoworkImageAttachmentPreviews } from '../../../shared/cowork/imageAttachments';
+import type { CoworkLocalInput } from '../../../shared/cowork/inputAttachments';
 import type { CoworkSelectedTextSnippet } from '../../../shared/cowork/selectedText';
 import startupCreditEntryGiftUrl from '../../assets/startup-credit-entry-gift.svg';
 import { EnterpriseQuotaPrompt } from '../../features/enterpriseAccount/components/EnterpriseQuotaPrompt';
@@ -330,6 +331,7 @@ const CoworkView: React.FC<CoworkViewProps> = ({
     selectedTextSnippets?: CoworkSelectedTextSnippet[],
     browserAnnotations?: CoworkBrowserAnnotationMessageBatch[],
     collaborationMode: CoworkCollaborationModeType = CoworkCollaborationMode.Default,
+    localInput?: CoworkLocalInput,
   ): Promise<boolean | void> => {
     console.log('[CoworkView] handleStartSession: imageAttachments diagnosis', {
       hasImageAttachments: !!imageAttachments,
@@ -498,6 +500,7 @@ const CoworkView: React.FC<CoworkViewProps> = ({
         modelOverride: sessionModelOverride,
         thinkingLevel: currentAgentThinkingLevel,
         imageAttachments,
+        localInput,
         mediaSelection: mediaSelection && mediaSelection.mode !== 'none' ? mediaSelection : undefined,
         mediaReferences,
         selectedTextSnippets,
@@ -574,6 +577,7 @@ const CoworkView: React.FC<CoworkViewProps> = ({
     selectedTextSnippets?: CoworkSelectedTextSnippet[],
     browserAnnotations?: CoworkBrowserAnnotationMessageBatch[],
     collaborationMode: CoworkCollaborationModeType = CoworkCollaborationMode.Default,
+    localInput?: CoworkLocalInput,
   ) => {
     if (!currentSession) return false;
     // Prevent duplicate submissions
@@ -624,6 +628,7 @@ const CoworkView: React.FC<CoworkViewProps> = ({
         kitReferences: displayKitIds.length > 0 ? kitReferences : undefined,
         resolvedKitCapabilities: displayKitIds.length > 0 ? resolvedKitCapabilities : undefined,
         imageAttachments,
+        localInput,
         mediaSelection: mediaSelection && mediaSelection.mode !== 'none' ? mediaSelection : undefined,
         mediaReferences,
         selectedTextSnippets,

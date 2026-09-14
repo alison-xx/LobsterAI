@@ -4,6 +4,8 @@ import { randomUUID } from 'crypto';
 import { OWNERSHIP_MANUAL_SOURCE } from '../../shared/ownership/constants';
 import { REMOTE_MESSAGE_BYTES, type RemoteAgentSummary, type RemoteOwner, type RemoteRunStatusValue } from '../../shared/remote/constants';
 import { payloadHash, remoteError, sameOwner, stableJson } from './canonical';
+import type { DesktopInputRun } from './desktopInputMetadata';
+import { remoteSyncErrorMetadata } from './remoteSyncLog';
 
 export interface ProjectionRecord { eventType: string; payload: Record<string, any> }
 export interface RemoteEvent extends ProjectionRecord { eventId: string; sourceSeq: string; occurredAt: string }
@@ -36,6 +38,7 @@ export class RemoteStore {
   private publishing = false;
   private artifactTracking = false;
   private approvalProjectionSupported = false;
+  private inputProjectionSupported = false;
   private approvalLifecycle: { expire(now: number): void; close(sessionId: string, runId: string, status: string): void } | null = null;
   private advanceCheckpoint: (() => number) | null = null;
   private enabledOwner: RemoteOwner | null = null;
@@ -151,6 +154,23 @@ export class RemoteStore {
     if (Boolean(this.agentSummary) === Boolean(resolver)) { this.agentSummary = resolver; return; }
     this.agentSummary = resolver;
     if (resolver) this.db.prepare(`INSERT OR IGNORE INTO remote_dirty SELECT session_id FROM cowork_session_ownership WHERE ownership_status='confirmed'`).run();
+  }
+  setInputProjectionSupported(supported: boolean): void {
+    if (this.inputProjectionSupported === supported) return;
+    this.inputProjectionSupported = supported;
+    this.db.prepare(`INSERT OR IGNORE INTO remote_dirty SELECT session_id FROM cowork_session_ownership WHERE ownership_status='confirmed'`).run();
+  }
+  inputVersion(sessionId: string): string {
+    const row = this.db.prepare('SELECT model_override,thinking_level FROM cowork_sessions WHERE id=?').get(sessionId);
+    if (!row) return '0';
+    const signature = payloadHash(row);
+    const previous = this.get<string>(`inputSignature:${sessionId}`);
+    let version = this.get<string>(`inputVersion:${sessionId}`) || '0';
+    if (previous !== signature) {
+      if (previous !== null) { version = String(BigInt(version) + 1n); this.remove(`inputModel:${sessionId}`); }
+      this.put(`inputSignature:${sessionId}`, signature); this.put(`inputVersion:${sessionId}`, version);
+    }
+    return version;
   }
   get<T>(key: string): T | null {
     const row = this.db.prepare('SELECT value FROM remote_state WHERE key=?').get(key) as { value: string } | undefined;
@@ -329,15 +349,30 @@ export class RemoteStore {
       if (dirty.length) this.changeVersion++;
       for (const { session_id: id } of dirty) {
         const owner = this.owner(id);
-        if (!owner) continue;
+        if (!owner) {
+          console.debug('[RemoteSync] Projection skipped', { localSessionId: id, reason: 'owner_not_confirmed' });
+          continue;
+        }
         if (!sameOwner(owner, this.enabledOwner)) {
+          console.debug('[RemoteSync] Snapshot required while synchronization disabled', { localSessionId: id });
           this.requireSnapshot(id);
           continue;
         }
         const hasAgentChanges = this.db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='agent_ownership_dirty'").get();
         const summaryOnly = Boolean(hasAgentChanges && this.db.prepare(`SELECT 1 FROM cowork_sessions s JOIN agent_ownership_dirty a ON a.agent_id=s.agent_id
           WHERE s.id=? AND NOT EXISTS (SELECT 1 FROM remote_content_dirty c WHERE c.session_id=s.id)`).get(id));
-        this.project(id, summaryOnly);
+        const before = this.sync(id);
+        try { this.project(id, summaryOnly); }
+        catch (error) {
+          console.warn('[RemoteSync] Local projection failed; transaction will roll back', { localSessionId: id, sessionId: before?.session_id ?? null,
+            sourceSeq: before?.source_seq ?? null, ...remoteSyncErrorMetadata(error) });
+          throw error;
+        }
+        const after = this.sync(id);
+        if (after && after.source_seq !== before?.source_seq) console.debug('[RemoteSync] Local projection staged', {
+          localSessionId: id, sessionId: after.session_id, sourceSeq: after.source_seq, previousSourceSeq: before?.source_seq ?? null,
+          ackSourceSeq: after.ack_seq, serverSeq: after.server_seq, needsSnapshot: Boolean(after.needs_snapshot),
+          controlVersion: this.controlVersion(id), runId: this.run(id)?.runId ?? null, runStatus: this.run(id)?.status ?? null, summaryOnly });
       }
       this.db.prepare('DELETE FROM remote_dirty').run();
       this.db.prepare('DELETE FROM remote_content_dirty').run();
@@ -402,7 +437,17 @@ export class RemoteStore {
     summaryOnly = summaryOnly && Boolean(previous);
     const messages = summaryOnly ? [] : this.db.prepare('SELECT * FROM cowork_messages WHERE session_id=? ORDER BY sequence,created_at,id').all(sessionId) as any[];
     const visible = messages.filter(publicMessage);
-    const latestText = visible.filter(m => ['user', 'assistant'].includes(m.type)).at(-1)?.content || '';
+    const latest = visible.filter(m => ['user', 'assistant'].includes(m.type)).at(-1);
+    let latestText = latest?.content || '';
+    if (latest?.type === 'user') {
+      try {
+        const metadata = JSON.parse(latest.metadata || '{}');
+        const prepared = this.get<{ input: { text: string } }>(`inputRun:${metadata.remoteRunId}`);
+        if (prepared) latestText = prepared.input.text;
+        const desktopInput = this.get<DesktopInputRun>(`desktopInputRun:${metadata.remoteRunId}`);
+        if (desktopInput && sameOwner(desktopInput.owner, this.owner(sessionId))) latestText = desktopInput.text;
+      } catch { /* Legacy malformed metadata has no trusted prepared input. */ }
+    }
     const approvals = this.entries<any>(`approval:${sessionId}:`).map(row => row.value);
     const publishedRunIds = new Set((this.db.prepare("SELECT object_key FROM remote_projection WHERE session_id=? AND object_key LIKE 'run:%'").all(sessionId) as Array<{ object_key: string }>).map(row => row.object_key.slice(4)));
     // A run terminal event may be the last event in an HTTP batch. Publish the executor's
@@ -413,6 +458,7 @@ export class RemoteStore {
       sessionId: this.sync(sessionId)?.session_id, title: shortName(publicText(s.title)), origin: this.get(`origin:${sessionId}`) || 'desktop',
       workspaceId: this.get(`workspace:${sessionId}`), preview: summaryOnly ? JSON.parse(previous!.record_json).payload.session.preview : preview(publicText(latestText)), createdAt: iso(s.created_at), updatedAt: iso(s.updated_at),
       localStatus: s.status, controlVersion: this.controlVersion(sessionId), run,
+      ...(this.inputProjectionSupported ? { inputVersion: this.inputVersion(sessionId), inputModel: this.get(`inputModel:${sessionId}`) } : {}),
       ...(this.agentSummary && this.owner(sessionId) ? { agent: this.agentSummary(sessionId, this.owner(sessionId)!) } : {}),
     } } });
     for (const { value: historicalRun } of this.entries<RemoteRun>(`runHistory:${sessionId}:`)) {
@@ -434,8 +480,33 @@ export class RemoteStore {
       if (metadata.remoteRunId && this.get<boolean>(`runPublished:${metadata.remoteRunId}`) === false) continue;
       const isTool = m.type.startsWith('tool_');
       const toolId = String(metadata.toolUseId || metadata.toolCallId || m.id);
-      const content = publicText(m.content);
+      const inputRun = this.get<{ input: { text: string; attachments: Array<{ assetId: string; version: string; fileName: string; mimeType: string; sizeBytes: string; intent: string }> }; inputModel: unknown }>(`inputRun:${metadata.remoteRunId}`);
+      const desktopInput = this.get<DesktopInputRun & { inputModel?: unknown }>(`desktopInputRun:${metadata.remoteRunId}`);
+      const ownDesktopInput = desktopInput && sameOwner(desktopInput.owner, this.owner(sessionId)) ? desktopInput : null;
+      const content = publicText(m.type === 'user' ? inputRun?.input.text ?? ownDesktopInput?.text ?? m.content : m.content);
       const blocks: any[] = isTool ? [{ type: 'tool', toolCallId: toolId }] : [{ type: m.type === 'user' ? 'text' : 'markdown', text: content }];
+      if (m.type === 'user' && inputRun) {
+        for (const asset of inputRun.input.attachments) blocks.push(this.inputProjectionSupported
+          ? { type: 'attachment', assetId: asset.assetId, version: asset.version, name: asset.fileName, mimeType: asset.mimeType,
+            sizeBytes: asset.sizeBytes, availability: 'ready', intent: asset.intent }
+          : { type: 'text', text: `[Attachment: ${shortName(asset.fileName)}]` });
+      }
+      if (m.type === 'user' && ownDesktopInput) {
+        for (const [index, source] of ownDesktopInput.attachments.entries()) {
+          const key = `desktopAsset:${m.id}:${index}`;
+          let job = this.get<any>(key);
+          if (!job) {
+            job = { ...source, owner: ownDesktopInput.owner, localSessionId: sessionId, sessionId: this.sync(sessionId)?.session_id,
+              messageId: m.id, uploadRequestId: randomUUID(), availability: 'desktop_only' };
+            this.put(key, job);
+          }
+          blocks.push(this.inputProjectionSupported && job.availability === 'ready' && job.uploadedAsset
+            ? { type: 'attachment', assetId: job.uploadedAsset.assetId, version: job.uploadedAsset.version, name: job.uploadedAsset.fileName,
+              mimeType: job.uploadedAsset.mimeType, sizeBytes: job.uploadedAsset.sizeBytes, availability: 'ready', intent: job.uploadedAsset.intent }
+            : { type: 'artifact', artifactId: job.uploadRequestId, name: source.fileName, mimeType: source.mimeType,
+              sizeBytes: source.sizeBytes, availability: 'desktop_only' });
+        }
+      }
       for (const artifact of artifacts.filter(a => a.last_message_id === m.id)) blocks.push({ type: 'artifact', artifactId: artifact.id,
         name: String(artifact.file_name).split(/[\\/]/).pop()!.slice(0, 128),
         mimeType: ({ pdf: 'application/pdf', txt: 'text/plain', md: 'text/markdown', png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', csv: 'text/csv', html: 'text/html' } as Record<string, string>)[String(artifact.extension).replace(/^\./, '').toLowerCase()] || 'application/octet-stream',
@@ -445,7 +516,8 @@ export class RemoteStore {
       const message: any = { messageId: m.id, ordinal: String(Math.max(1, m.sequence || 1)), revision: '0',
         runId: metadata.remoteRunId || null, commandId: metadata.remoteCommandId || null,
         role: isTool ? 'tool' : m.type, status: metadata.isStreaming ? 'streaming' : 'complete', createdAt: iso(m.created_at),
-        contentState: 'complete', preview: isTool ? '' : preview(content), originalContentBytes: String(Buffer.byteLength(stableJson(blocks))), blocks };
+        contentState: 'complete', preview: isTool ? '' : preview(content), originalContentBytes: String(Buffer.byteLength(stableJson(blocks))), blocks,
+        ...(this.inputProjectionSupported && (inputRun || ownDesktopInput?.inputModel) ? { inputModel: inputRun?.inputModel ?? ownDesktopInput?.inputModel ?? null } : {}) };
       if (Buffer.byteLength(stableJson(message)) > REMOTE_MESSAGE_BYTES - 128) { message.blocks = []; message.contentState = 'desktop_only'; }
       this.record(sessionId, `message:${m.id}`, { eventType: 'message.upsert', payload: { message } });
       liveKeys.add(`message:${m.id}`);

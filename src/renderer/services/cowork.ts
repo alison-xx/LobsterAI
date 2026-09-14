@@ -1148,6 +1148,7 @@ class CoworkService {
       kitReferences: options.kitReferences,
       resolvedKitCapabilities: options.resolvedKitCapabilities,
       imageAttachments: options.imageAttachments,
+      localInput: options.localInput,
       mediaSelection: options.mediaSelection,
       mediaReferences: options.mediaReferences,
       selectedTextSnippets: options.selectedTextSnippets,

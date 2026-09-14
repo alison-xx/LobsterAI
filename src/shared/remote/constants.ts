@@ -51,6 +51,7 @@ export interface RemoteAgentSummary {
   version: string; state: typeof RemoteAgentState[keyof typeof RemoteAgentState];
 }
 export interface RemoteAgentCatalogItem {
+  defaultInput?: { modelRef: string | null; modelVersion: string | null; thinkingLevel: string | null };
   agentId: string; name: string; icon: string | null; kind: 'default' | 'owned'; version: string;
   enabled: boolean; defaultWorkspaceId: string | null; workspaceAvailable: boolean;
   unavailableReason: typeof RemoteAgentReason[keyof typeof RemoteAgentReason] | null;

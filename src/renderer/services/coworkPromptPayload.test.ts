@@ -20,6 +20,7 @@ describe('prepareCoworkPromptPayload', () => {
       success: true,
       payload: {
         finalPrompt: 'continue\n\nFile: /tmp/file.txt\nFolder: /tmp/folder',
+        localInput: { text: 'continue', attachments: [{ path: '/tmp/file.txt', name: 'file.txt', intent: 'file' }] },
       },
     });
   });
@@ -41,6 +42,7 @@ describe('prepareCoworkPromptPayload', () => {
       success: true,
       payload: {
         finalPrompt: 'continue\n\nFile: C:\\Users\\tester\\notes.txt\nFolder: D:\\workspace\\assets',
+        localInput: { text: 'continue', attachments: [{ path: 'C:\\Users\\tester\\notes.txt', name: 'notes.txt', intent: 'file' }] },
       },
     });
   });
@@ -65,6 +67,7 @@ describe('prepareCoworkPromptPayload', () => {
       success: true,
       payload: {
         finalPrompt: 'inspect',
+        localInput: { text: 'inspect', attachments: [{ path: '/tmp/image.png', name: 'image.png', intent: 'image' }] },
         imageAttachments: [{
           name: 'image.png',
           mimeType: 'image/png',
@@ -92,6 +95,7 @@ describe('prepareCoworkPromptPayload', () => {
       success: true,
       payload: {
         finalPrompt: 'inspect\n\nFile: /tmp/image.png',
+        localInput: { text: 'inspect', attachments: [{ path: '/tmp/image.png', name: 'image.png', intent: 'file' }] },
       },
     });
   });

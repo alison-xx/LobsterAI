@@ -1,0 +1,48 @@
+import Database from 'better-sqlite3';
+import { afterEach, expect, it } from 'vitest';
+
+import { RemoteStore } from './remoteStore';
+
+const owner = { userId: 'A', scopeKey: 'personal' };
+const databases: Database.Database[] = [];
+afterEach(() => { for (const db of databases.splice(0)) db.close(); });
+function fixture(): RemoteStore {
+  const db = new Database(':memory:'); databases.push(db);
+  db.exec(`CREATE TABLE cowork_sessions(id TEXT PRIMARY KEY,title TEXT,created_at INTEGER,updated_at INTEGER,status TEXT,model_override TEXT,thinking_level TEXT);
+    CREATE TABLE cowork_messages(id TEXT PRIMARY KEY,session_id TEXT,type TEXT,content TEXT,metadata TEXT,created_at INTEGER,sequence INTEGER);`);
+  const store = new RemoteStore(db); store.setEnabledOwner(owner); store.setInputProjectionSupported(true);
+  store.transaction(() => { db.exec("INSERT INTO cowork_sessions VALUES('s','Task',1,1,'idle','provider/model','low')"); store.assignNew('s', owner, 'local_create'); });
+  return store;
+}
+function userMessage(store: RemoteStore): void {
+  store.transaction(() => store.db.prepare("INSERT INTO cowork_messages VALUES('m','s','user',?, ?,2,1)").run('Analyze\nFile: /private/secret/report.txt', JSON.stringify({ remoteRunId: 'run' })));
+}
+it('projects mobile attachment references and original text without generated local file paths', () => {
+  const store = fixture();
+  store.put('inputRun:run', { input: { text: 'Analyze', attachments: [{ assetId: 'asset', version: '1', fileName: 'report.txt', mimeType: 'text/plain', sizeBytes: '12', intent: 'file' }] }, inputModel: null });
+  userMessage(store);
+  const projection = store.snapshot('s');
+  expect(JSON.stringify(projection)).not.toContain('/private/secret');
+  expect(projection.records.find(row => row.eventType === 'message.upsert')?.payload.message.blocks[1]).toMatchObject({ type: 'attachment', assetId: 'asset', availability: 'ready' });
+});
+it('creates one stable desktop placeholder and uses completed server MIME at a higher revision', () => {
+  const store = fixture();
+  store.put('desktopInputRun:run', { owner, text: 'Analyze', attachments: [{ path: '/private/secret/report.txt', fileName: 'report.txt', mimeType: 'text/plain', sizeBytes: '12', intent: 'file' }] });
+  userMessage(store);
+  const before = store.snapshot('s').records.find(row => row.eventType === 'message.upsert')!.payload.message;
+  expect(before.blocks[1]).toMatchObject({ type: 'artifact', availability: 'desktop_only' });
+  const job = store.get<any>('desktopAsset:m:0');
+  store.put('desktopAsset:m:0', { ...job, availability: 'ready', uploadedAsset: { assetId: 'asset', version: '1', fileName: 'report.txt', mimeType: 'application/octet-stream', sizeBytes: '12', intent: 'file' } });
+  const after = store.snapshot('s').records.find(row => row.eventType === 'message.upsert')!.payload.message;
+  expect(after.blocks[1]).toMatchObject({ type: 'attachment', mimeType: 'application/octet-stream' });
+  expect(BigInt(after.revision)).toBeGreaterThan(BigInt(before.revision));
+  expect(store.entries('desktopAsset:')).toHaveLength(1);
+  expect(JSON.stringify(after)).not.toContain('/private/secret');
+});
+it('does not expose attachment metadata from a different account run', () => {
+  const store = fixture();
+  store.put('desktopInputRun:run', { owner: { userId: 'B', scopeKey: 'personal' }, text: 'private text', attachments: [{ path: '/b', fileName: 'private.txt' }] });
+  userMessage(store);
+  const projection = store.snapshot('s');
+  expect(JSON.stringify(projection)).not.toContain('private.txt'); expect(store.entries('desktopAsset:')).toHaveLength(0);
+});

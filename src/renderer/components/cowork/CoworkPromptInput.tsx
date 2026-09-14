@@ -34,6 +34,7 @@ import {
   CoworkImageAttachmentRole,
   formatCoworkImageAttachmentLimit,
 } from '../../../shared/cowork/imageAttachments';
+import type { CoworkLocalInput } from '../../../shared/cowork/inputAttachments';
 import { isPlanImplementationApproval } from '../../../shared/cowork/planMode';
 import type { CoworkSelectedTextSnippet } from '../../../shared/cowork/selectedText';
 import {
@@ -431,6 +432,7 @@ interface CoworkPromptInputProps {
     selectedTextSnippets?: CoworkSelectedTextSnippet[],
     browserAnnotations?: CoworkBrowserAnnotationMessageBatch[],
     collaborationMode?: CoworkCollaborationMode,
+    localInput?: CoworkLocalInput,
   ) => boolean | void | Promise<boolean | void>;
   onStop?: () => void | Promise<void>;
   isStreaming?: boolean;
@@ -1906,6 +1908,7 @@ const CoworkPromptInput = React.forwardRef<CoworkPromptInputRef, CoworkPromptInp
       promptPayload.selectedTextSnippets,
       preparedBrowserAnnotations,
       effectiveCollaborationMode,
+      promptPayload.localInput,
     );
     if (result === false) {
       reportPromptControl('submit_blocked', {

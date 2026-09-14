@@ -11,6 +11,7 @@ import type {
   CoworkImageAttachmentPayload,
   CoworkImageAttachmentPreview,
 } from '../../shared/cowork/imageAttachments';
+import type { CoworkLocalInput } from '../../shared/cowork/inputAttachments';
 import type { CoworkSelectedTextSnippet } from '../../shared/cowork/selectedText';
 import type {
   KitReference,
@@ -362,6 +363,7 @@ export interface SubagentSessionSummary {
 
 // Start session options
 export interface CoworkStartOptions {
+  localInput?: CoworkLocalInput;
   prompt: string;
   cwd?: string;
   systemPrompt?: string;
@@ -383,6 +385,7 @@ export interface CoworkStartOptions {
 
 // Continue session options
 export interface CoworkContinueOptions {
+  localInput?: CoworkLocalInput;
   sessionId: string;
   prompt: string;
   systemPrompt?: string;

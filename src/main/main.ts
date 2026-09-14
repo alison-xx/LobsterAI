@@ -118,6 +118,7 @@ import {
   formatCoworkImageAttachmentLimit,
   validateCoworkImageAttachmentSize,
 } from '../shared/cowork/imageAttachments';
+import type { CoworkLocalInput } from '../shared/cowork/inputAttachments';
 import { containsPlanModePrompt } from '../shared/cowork/planMode';
 import type { CoworkSearchMessageCursor } from '../shared/cowork/search';
 import {
@@ -577,8 +578,12 @@ import { fenceCronJobs,filterOwnedInstances } from './remote/automationOwnership
 import { sameOwner } from './remote/canonical';
 import { configureRemoteSettings } from './remote/configureRemoteSettings';
 import { prepareDefaultWorkspace } from './remote/defaultWorkspace';
+import { captureDesktopInput } from './remote/desktopInputMetadata';
+import { InputPreparationService } from './remote/inputPreparationService';
 import { createRemoteDatabaseFence,loadRemoteIdentity } from './remote/installationIdentity';
 import { RemoteBridge } from './remote/remoteBridge';
+import { listRemoteInputModels } from './remote/remoteInputModels';
+import { RemoteModelCatalog } from './remote/remoteModelCatalog';
 import { PREVENT_SLEEP_STORE_KEY, RemoteSettingsController } from './remote/remoteSettingsController';
 import { assertRemoteExecutionPermit,currentRemoteExecution, markRemoteExecutionDispatched, SessionCommandService } from './remote/sessionCommandService';
 import { SkillManager } from './skills/skillManager';
@@ -5536,7 +5541,32 @@ if (!gotTheLock) {
     const identity = loadRemoteIdentity(app.getPath('appData'), app.getPath('userData'), safeStorage);
     const fence = createRemoteDatabaseFence(app.getPath('appData'), app.getPath('userData'), safeStorage, identity);
     getCoworkStore().remote.validateDatabaseInstance(identity.databaseId, fence.checkpoint, fence.advance);
+    const models = new RemoteModelCatalog(getCoworkStore().remote, () => listRemoteInputModels({
+      token: getAuthTokens()?.accessToken || null, baseURL: getServerApiBaseUrl(),
+    }));
+    const preparations = new InputPreparationService({
+      store: getCoworkStore(), models, cacheRoot: path.join(app.getPath('userData'), 'remote-inputs'),
+      getOwner: getCurrentRemoteOwner, getDefaultModel: resolveDefaultAgentModelRef,
+      getAgentCatalog: () => remoteBridge?.getInputAgentCatalog() || null,
+      convertImage: async (filePath, _mimeType, targetPath) => {
+        const decoded = nativeImage.createFromPath(filePath);
+        if (decoded.isEmpty()) throw new Error('INPUT_UNSUPPORTED');
+        await fs.promises.writeFile(targetPath, decoded.toPNG(), { flag: 'wx', mode: 0o600 });
+        return { path: targetPath, mimeType: 'image/png' };
+      },
+    });
+    remoteSessionCommands!.configureInput({ models, preparations, getDeviceId: () => remoteBridge?.state().deviceId });
     remoteBridge = new RemoteBridge({
+      input: { models, preparations },
+      getAgentDefaultInput: (owner, deviceId, agentId) => {
+        try {
+          const agent = getCoworkStore().getVisibleAgent(agentId, owner);
+          const resolved = models.resolveRuntime(owner, deviceId, agent?.model || resolveDefaultAgentModelRef());
+          const thinking = agent?.thinkingLevel || resolved.item.thinking.default || null;
+          return { modelRef: resolved.item.modelRef, modelVersion: resolved.item.version,
+            thinkingLevel: thinking && resolved.item.thinking.options.includes(thinking) ? thinking : null };
+        } catch { return { modelRef: null, modelVersion: null, thinkingLevel: null }; }
+      },
       agentOwnership: getCoworkStore().agentOwnership,
       store: getCoworkStore().remote, identity, getOwner: getCurrentRemoteOwner, getApiBaseUrl: getServerApiBaseUrl,
       metadata: { name: os.hostname(), hostName: os.hostname(), instanceLabel: path.basename(app.getPath('userData')),
@@ -9338,6 +9368,25 @@ if (!gotTheLock) {
 
 
   // Cowork IPC handlers
+  const recordDesktopInput = async (sessionId: string, options: { prompt: string; localInput?: CoworkLocalInput; imageAttachments?: CoworkImageAttachmentMain[] }): Promise<void> => {
+    if (currentRemoteExecution()?.commandId) return;
+    const owner = getCurrentRemoteOwner();
+    const runId = getCoworkStore().remote.run(sessionId)?.runId;
+    const epoch = `${ownershipAccountEpoch}:${authAccountGeneration}`;
+    if (!owner || !runId || !sameOwner(getCoworkStore().remote.owner(sessionId), owner)) return;
+    const current = (): boolean => epoch === `${ownershipAccountEpoch}:${authAccountGeneration}` && sameOwner(owner, getCurrentRemoteOwner())
+      && sameOwner(getCoworkStore().remote.owner(sessionId), owner) && getCoworkStore().remote.run(sessionId)?.runId === runId;
+    const captured = await captureDesktopInput(options.localInput, options.imageAttachments, {
+      owner, fallbackText: options.prompt, cacheRoot: path.join(app.getPath('userData'), 'remote-desktop-inputs'), current,
+      access: filePath => captureLibraryFileAccess(filePath),
+    });
+    if (current()) {
+      const inputModel = remoteSessionCommands?.recordCurrentInputModel(sessionId) || null;
+      if (captured) getCoworkStore().remote.put(`desktopInputRun:${runId}`, { ...captured, inputModel });
+      else if (inputModel) getCoworkStore().remote.put(`desktopInputRun:${runId}`, { owner, text: options.prompt, attachments: [], inputModel });
+    }
+  };
+
   const startCoworkSession = async (
       options: {
         prompt: string;
@@ -9350,6 +9399,7 @@ if (!gotTheLock) {
         kitReferences?: KitReference[];
         resolvedKitCapabilities?: ResolvedKitCapabilities;
         imageAttachments?: CoworkImageAttachmentMain[];
+        localInput?: CoworkLocalInput;
         agentId?: string;
         modelOverride?: string;
         thinkingLevel?: string;
@@ -9523,6 +9573,8 @@ if (!gotTheLock) {
           imageAttachmentPreviews,
         });
         if (!execution?.runId) coworkStoreInstance.remote.beginRun(session.id);
+        await recordDesktopInput(session.id, options);
+        assertRemoteExecutionPermit();
         coworkStoreInstance.addMessage(session.id, {
           type: 'user',
           content: prompt,
@@ -9605,6 +9657,7 @@ if (!gotTheLock) {
         kitReferences?: KitReference[];
         resolvedKitCapabilities?: ResolvedKitCapabilities;
         imageAttachments?: CoworkImageAttachmentMain[];
+        localInput?: CoworkLocalInput;
         mediaSelection?: {
           mode: 'auto' | 'image' | 'video' | 'none';
           modelId?: string;
@@ -9655,6 +9708,8 @@ if (!gotTheLock) {
         coworkStoreInstance.remote.assertActor(options.sessionId, execution?.owner ?? null);
         if (execution?.owner && !sameOwner(execution.owner, getCurrentRemoteOwner())) throw new Error('Account changed');
         if (!execution?.runId) coworkStoreInstance.remote.beginRun(options.sessionId);
+        await recordDesktopInput(options.sessionId, options);
+        assertRemoteExecutionPermit();
         const config = coworkStoreInstance.getConfig();
         const hasLegacyPersistedPlanMode = containsPlanModePrompt(existingSession?.systemPrompt);
         const continuationSystemPrompt = mergeCoworkSystemPrompt(
@@ -10953,8 +11008,7 @@ if (!gotTheLock) {
       if (patch.model) {
         patch.model = normalizeOpenClawModelRef(patch.model);
       }
-      const runtime = getCoworkEngineRouter();
-      const patchResult = await runtime.patchSession(sessionId, patch);
+      const patchResult = await remoteSessionCommands!.patchConfiguration(sessionId, patch);
       getCoworkStore().remote.assertActor(sessionId, getCurrentRemoteOwner());
 
       if (patch.model !== undefined || patch.thinkingLevel !== undefined) {
