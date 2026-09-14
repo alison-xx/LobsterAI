@@ -37,6 +37,7 @@ function fixture(registered = true) {
     return new Response(JSON.stringify({ code: 0, data }));
   });
   const deps = { store, identity: { installationId: 'instance', deviceKey: 'key', databaseId: 'db' },
+    runSessionTransaction: <T>(operation: () => T) => store.transaction(operation),
     getOwner: () => owner, getApiBaseUrl: () => 'https://example.com', request,
     metadata: { name: 'host.local', hostName: 'host.local', instanceLabel: 'default', platform: 'macos', appVersion: '1' },
     getDefaultWorkspace: undefined as undefined | (() => { path: string; name: string; available?: boolean }),

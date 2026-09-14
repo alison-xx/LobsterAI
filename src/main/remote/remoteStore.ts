@@ -265,6 +265,9 @@ export class RemoteStore {
     const run = this.run(sessionId);
     if (!run) return;
     this.transaction(() => {
+      // Publishing a reserved run changes the summary from run=null to this run.
+      // It must have a newer control version even if execution has not left starting yet.
+      if (this.get<boolean>(`runPublished:${run.runId}`) === false) this.bumpControl(sessionId);
       this.put(`runPublished:${run.runId}`, true);
       this.db.prepare('INSERT OR IGNORE INTO remote_dirty VALUES (?)').run(sessionId);
     });
@@ -341,6 +344,15 @@ export class RemoteStore {
   requireSnapshot(sessionId: string): void {
     this.db.prepare('UPDATE remote_sync SET needs_snapshot=1 WHERE local_id=?').run(sessionId);
     this.put(`snapshotEpoch:${sessionId}`, (this.get<number>(`snapshotEpoch:${sessionId}`) || 0) + 1);
+  }
+  /** Repair old run-publication events without rewriting their assigned source sequences. */
+  requireRunMappingSnapshot(sessionId: string): void {
+    this.transaction(() => {
+      // A legacy null-run summary may already be committed at the current control version.
+      this.bumpControl(sessionId);
+      this.requireSnapshot(sessionId);
+      this.db.prepare('INSERT OR IGNORE INTO remote_dirty VALUES (?)').run(sessionId);
+    });
   }
   private captureDirty(): void {
     this.publishing = true;

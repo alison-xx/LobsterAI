@@ -1,3 +1,5 @@
+import { RemoteSyncConflict } from '../../shared/remote/constants';
+
 /** Diagnostic metadata only. Never pass raw requests, responses or errors to the logger. */
 export const REMOTE_SYNC_REQUEST_ID_HEADER = 'X-Remote-Request-Id';
 
@@ -13,7 +15,7 @@ const validationMessages = new Set([
   'Invalid remote response', 'Remote payload must contain finite JSON values',
   'Account changed during remote request', 'Account changed during remote response',
   'Object version has different content', 'Message identity and ordinal cannot change',
-  'Deleted message cannot be resurrected', 'Changing the current run must advance controlVersion',
+  'Deleted message cannot be resurrected', RemoteSyncConflict.RunMapping,
   'A source sequence cannot change content', 'Event hash mismatch',
 ]);
 const object = (value: unknown): Record<string, any> => value !== null && typeof value === 'object' && !Array.isArray(value) ? value : {};

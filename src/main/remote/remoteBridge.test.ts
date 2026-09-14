@@ -52,6 +52,7 @@ function fixture() {
     return new Response(JSON.stringify({ code: 0, message: 'success', data }));
   });
   const bridge: any = new RemoteBridge({ store, identity: { installationId: 'instance', deviceKey: 'key', databaseId: 'db' },
+    runSessionTransaction: <T>(operation: () => T) => store.transaction(operation),
     getOwner: () => owner, getApiBaseUrl: () => 'https://example.com', request: requestApi,
     metadata: { name: 'Desktop', hostName: 'host', platform: 'macos', appVersion: '1', instanceLabel: 'default' },
     prepare: () => { store.db.prepare("INSERT INTO cowork_sessions VALUES ('local','hello',1,1,'idle')").run(); store.assignNew('local', owner, 'remote_command'); return { localSessionId: 'local', remoteSessionId: 'remote', runId: command.runId }; },

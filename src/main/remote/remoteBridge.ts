@@ -6,7 +6,7 @@ import { AgentOwnerKind } from '../../shared/agent/constants';
 import type { ApprovalDecisionOutcome } from '../../shared/cowork/approval';
 import { OwnershipSyncState, OwnershipTargetKind } from '../../shared/ownership/constants';
 import type { OwnershipTarget } from '../../shared/ownership/types';
-import { REMOTE_AGENT_CATALOG_BYTES, REMOTE_AGENT_CATALOG_ITEMS, REMOTE_PROTOCOL_VERSION, REMOTE_TEXT_BYTES, type RemoteAgentCatalogItem, RemoteCapability, RemoteConnectionReason, type RemoteConnectionReasonValue, RemoteConnectionStatus, type RemoteOwner, type RemoteSettingsState, RemoteSyncStatus, type RemoteWorkspace } from '../../shared/remote/constants';
+import { REMOTE_AGENT_CATALOG_BYTES, REMOTE_AGENT_CATALOG_ITEMS, REMOTE_PROTOCOL_VERSION, REMOTE_TEXT_BYTES, type RemoteAgentCatalogItem, RemoteCapability, RemoteConnectionReason, type RemoteConnectionReasonValue, RemoteConnectionStatus, type RemoteOwner, type RemoteSettingsState, RemoteSyncConflict, RemoteSyncStatus, type RemoteWorkspace } from '../../shared/remote/constants';
 import { RemoteInputCapability, RemoteInputReason, RemoteInputStatus, type RemotePreparationClaim } from '../../shared/remote/input';
 import type { AgentOwnerStore } from '../agentOwnership';
 import { OwnershipAssociationStore, type OwnershipClaimBlocks } from '../ownershipAssociationStore';
@@ -35,6 +35,8 @@ export interface BridgeDependencies {
   input?: { models: RemoteModelCatalog; preparations: InputPreparationService };
   getAgentDefaultInput?(owner: RemoteOwner, deviceId: string, agentId: string): RemoteAgentCatalogItem['defaultInput'];
   store: RemoteStore; identity: RemoteIdentity;
+  /** Session creation and inbox persistence share the outer commit/notification boundary. */
+  runSessionTransaction<T>(operation: () => T): T;
   agentOwnership?: AgentOwnerStore;
   supportsDualApproval?(): boolean;
   configureDualApproval?(options: { enabled: boolean; projectionSupported: boolean }): void;
@@ -668,6 +670,13 @@ export class RemoteBridge {
           importId: this.deps.store.get<SavedImport>(`import:${row.local_id}`)?.importId ?? null, retryDelayMs: this.isGlobalError(error) ? null : 30000,
           phase: row.needs_snapshot || this.deps.store.get(`import:${row.local_id}`) ? 'snapshot' : 'batch', ...diagnostic });
         if (this.isGlobalError(error)) throw error;
+        if (error instanceof RemoteApiError && error.code === 47006 && error.message === RemoteSyncConflict.RunMapping
+          && !row.needs_snapshot && !this.deps.store.get(`import:${row.local_id}`)) {
+          this.deps.store.requireRunMappingSnapshot(row.local_id);
+          console.debug('[RemoteSync] Run mapping recovery snapshot scheduled', { localSessionId: row.local_id, sessionId: row.session_id,
+            controlVersion: this.deps.store.controlVersion(row.local_id), ackSourceSeq: row.ack_seq,
+            sourceSeq: this.deps.store.sync(row.local_id)?.source_seq ?? null });
+        }
         this.deps.store.put(`syncFailure:${row.local_id}`, { ...diagnostic, retryAt: Date.now() + 30000 });
         this.error = SESSION_SYNC_ERROR_MESSAGE;
       }
@@ -880,7 +889,7 @@ export class RemoteBridge {
         const text = request.inputSchemaVersion === 2 ? request.payload?.resolvedInput?.text : request.payload?.text;
         if (['create_session', 'send_message'].includes(command.type) && (typeof text !== 'string' || (!text.trim() && !(request.inputSchemaVersion === 2 && request.payload?.resolvedInput?.attachments?.length)) || Buffer.byteLength(text) > REMOTE_TEXT_BYTES)) throw new Error('Invalid remote text');
         const workspace = this.commandWorkspace(command);
-        entry = this.deps.store.transaction(() => {
+        entry = this.deps.runSessionTransaction(() => {
           const prepared = this.deps.prepare(command, this.owner!, workspace);
           this.deps.store.bindRemote(prepared.localSessionId, prepared.remoteSessionId, this.registration!.deviceId);
           const value: InboxEntry = { command, owner: this.owner!, ...prepared, state: 'prepared', result: null };
@@ -953,7 +962,7 @@ export class RemoteBridge {
           && !this.deps.store.entries<any>('run:').some(row => row.value.runId === command.runId)) {
           try {
             const workspace = this.commandWorkspace(command);
-            entry = this.deps.store.transaction(() => {
+            entry = this.deps.runSessionTransaction(() => {
               const prepared = this.deps.prepare(command, this.owner!, workspace);
               this.deps.store.bindRemote(prepared.localSessionId, prepared.remoteSessionId, this.registration!.deviceId);
               const value: InboxEntry = { owner: this.owner!, command: { ...command, claimId: envelope.currentClaimId }, ...prepared, state: 'prepared', result: null };

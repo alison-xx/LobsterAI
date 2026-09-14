@@ -5597,6 +5597,7 @@ if (!gotTheLock) {
         }
       },
       onStateChange: () => remoteSettingsController?.notify(),
+      runSessionTransaction: operation => getCoworkStore().runSessionTransaction(operation),
       prepare: (command, owner, workspace) => remoteSessionCommands!.prepare(command, owner, workspace),
       execute: (entry, stillPermitted) => remoteSessionCommands!.execute(entry, stillPermitted),
       supportsDualApproval: () => getCoworkEngineRouter().supportsDualApproval?.() === true,

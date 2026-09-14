@@ -17,6 +17,7 @@ function fixture() {
   const store = new RemoteStore(db);
   const request = vi.fn(async (_owner, _pathname, _init): Promise<Response> => new Response(JSON.stringify({ code: 0, data: {} })));
   const bridge: any = new RemoteBridge({ store, identity: { installationId: 'instance', deviceKey: privateText, databaseId: 'db' },
+    runSessionTransaction: <T>(operation: () => T) => store.transaction(operation),
     getOwner: () => owner, getApiBaseUrl: () => 'https://example.com', request,
     metadata: { name: 'Desktop', hostName: 'host', platform: 'macos', appVersion: '1', instanceLabel: 'default' },
     prepare: vi.fn(), execute: vi.fn(), onAccountChange: vi.fn() });

@@ -23,6 +23,7 @@ export const RemoteConnectionReason = {
 } as const;
 export type RemoteConnectionReasonValue = typeof RemoteConnectionReason[keyof typeof RemoteConnectionReason];
 export const RemoteSyncStatus = { Synced: 'synced', Pending: 'pending', Error: 'error' } as const;
+export const RemoteSyncConflict = { RunMapping: 'Changing the current run must advance controlVersion' } as const;
 export interface RemoteSettingsState {
   screenLocked?: boolean; hostName?: string; stateRevision?: number; accountEpoch?: string;
   connectionStatus?: typeof RemoteConnectionStatus[keyof typeof RemoteConnectionStatus];
