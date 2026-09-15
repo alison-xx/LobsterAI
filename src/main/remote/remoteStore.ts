@@ -39,6 +39,10 @@ export class RemoteStore {
   private artifactTracking = false;
   private approvalProjectionSupported = false;
   private inputProjectionSupported = false;
+  private fileProjectionSupported = false;
+  private fileEnvironment: string | null = null;
+  private fileTerminalBoundary: ((sessionId: string, runId: string) => void) | null = null;
+  private artifactProjection: ((sessionId: string, messageId: string) => Array<{ localArtifactId: string; block: Record<string, unknown> }>) | null = null;
   private approvalLifecycle: { expire(now: number): void; close(sessionId: string, runId: string, status: string): void } | null = null;
   private advanceCheckpoint: (() => number) | null = null;
   private enabledOwner: RemoteOwner | null = null;
@@ -113,6 +117,18 @@ export class RemoteStore {
   }
 
   setWake(listener: () => void): void { this.wake = listener; }
+  setFileTerminalBoundary(listener: (sessionId: string, runId: string) => void): void { this.fileTerminalBoundary = listener; }
+  setFileEnvironment(environment: string): void { this.fileEnvironment = environment; }
+  setArtifactProjectionResolver(resolver: NonNullable<RemoteStore['artifactProjection']>): void { this.artifactProjection = resolver; }
+  markFilesDirty(sessionId: string): void {
+    this.db.prepare('INSERT OR IGNORE INTO remote_content_dirty VALUES (?)').run(sessionId);
+    this.db.prepare('INSERT OR IGNORE INTO remote_dirty VALUES (?)').run(sessionId);
+  }
+  setFileProjectionSupported(supported: boolean): void {
+    if (supported === this.fileProjectionSupported) return;
+    this.fileProjectionSupported = supported;
+    for (const { session_id } of this.db.prepare("SELECT session_id FROM cowork_session_ownership WHERE ownership_status='confirmed'").all() as Array<{ session_id: string }>) this.markFilesDirty(session_id);
+  }
   setEnabledOwner(owner: RemoteOwner | null): void { this.enabledOwner = owner; }
   setApprovalProjectionSupported(supported: boolean): void { this.approvalProjectionSupported = supported; }
   setApprovalLifecycle(lifecycle: { expire(now: number): void; close(sessionId: string, runId: string, status: string): void }): void { this.approvalLifecycle = lifecycle; }
@@ -297,6 +313,9 @@ export class RemoteStore {
     const run: RemoteRun = { runId, status: 'starting', statusVersion: '1', startedAt: iso(Date.now()), finishedAt: null, error: null };
     this.transaction(() => {
       this.remove(`gatewayRun:${sessionId}`);
+      const runOrdinal = String(BigInt(this.get<string>(`fileRunOrdinal:${sessionId}`) || '0') + 1n);
+      this.put(`fileRunOrdinal:${sessionId}`, runOrdinal);
+      this.put(`fileRunOrdinal:${sessionId}:${runId}`, runOrdinal);
       this.put(`run:${sessionId}`, run);
       this.put(`runHistory:${sessionId}:${runId}`, run);
       this.put(`runCommand:${sessionId}`, commandId);
@@ -314,6 +333,8 @@ export class RemoteStore {
         finishedAt: terminal.has(status) ? iso(Date.now()) : null,
         error: error ? remoteError(47019, 'EXECUTION_FAILED', error) : null });
       if (terminal.has(status)) {
+        try { this.fileTerminalBoundary?.(sessionId, previous.runId); }
+        catch { console.warn('[RemoteFiles] Final snapshot capture deferred'); }
         this.approvalLifecycle?.close(sessionId, previous.runId, status);
         // Legacy records have no private decision service; never invent a decision from resolution alone.
         for (const { key, value: approval } of this.entries<any>(`approval:${sessionId}:`)) {
@@ -513,18 +534,21 @@ export class RemoteStore {
             this.put(key, job);
           }
           blocks.push(this.inputProjectionSupported && job.availability === 'ready' && job.uploadedAsset
+            && (!this.fileEnvironment || job.environment === this.fileEnvironment)
             ? { type: 'attachment', assetId: job.uploadedAsset.assetId, version: job.uploadedAsset.version, name: job.uploadedAsset.fileName,
               mimeType: job.uploadedAsset.mimeType, sizeBytes: job.uploadedAsset.sizeBytes, availability: 'ready', intent: job.uploadedAsset.intent }
             : { type: 'artifact', artifactId: job.uploadRequestId, name: source.fileName, mimeType: source.mimeType,
               sizeBytes: source.sizeBytes, availability: 'desktop_only' });
         }
       }
-      for (const artifact of artifacts.filter(a => a.last_message_id === m.id)) blocks.push({ type: 'artifact', artifactId: artifact.id,
+      const remoteArtifacts = this.fileProjectionSupported ? this.artifactProjection?.(sessionId, m.id) || [] : [];
+      for (const artifact of artifacts.filter(a => a.last_message_id === m.id && !remoteArtifacts.some(value => value.localArtifactId === a.id))) blocks.push({ type: 'artifact', artifactId: artifact.id,
         name: String(artifact.file_name).split(/[\\/]/).pop()!.slice(0, 128),
         mimeType: ({ pdf: 'application/pdf', txt: 'text/plain', md: 'text/markdown', png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', csv: 'text/csv', html: 'text/html' } as Record<string, string>)[String(artifact.extension).replace(/^\./, '').toLowerCase()] || 'application/octet-stream',
         sizeBytes: Number.isSafeInteger(artifact.size_bytes) && artifact.size_bytes >= 0 ? String(artifact.size_bytes) : null,
         availability: artifact.availability === 'missing' ? 'missing' : 'desktop_only',
       });
+      blocks.push(...remoteArtifacts.map(value => value.block));
       const message: any = { messageId: m.id, ordinal: String(Math.max(1, m.sequence || 1)), revision: '0',
         runId: metadata.remoteRunId || null, commandId: metadata.remoteCommandId || null,
         role: isTool ? 'tool' : m.type, status: metadata.isStreaming ? 'streaming' : 'complete', createdAt: iso(m.created_at),

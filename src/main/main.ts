@@ -5558,6 +5558,7 @@ if (!gotTheLock) {
     remoteSessionCommands!.configureInput({ models, preparations, getDeviceId: () => remoteBridge?.state().deviceId });
     remoteBridge = new RemoteBridge({
       input: { models, preparations },
+      files: { cacheRoot: path.join(app.getPath('userData'), 'remote-file-uploads'), access: filePath => captureLibraryFileAccess(filePath) },
       getAgentDefaultInput: (owner, deviceId, agentId) => {
         try {
           const agent = getCoworkStore().getVisibleAgent(agentId, owner);
@@ -9378,7 +9379,8 @@ if (!gotTheLock) {
     const current = (): boolean => epoch === `${ownershipAccountEpoch}:${authAccountGeneration}` && sameOwner(owner, getCurrentRemoteOwner())
       && sameOwner(getCoworkStore().remote.owner(sessionId), owner) && getCoworkStore().remote.run(sessionId)?.runId === runId;
     const captured = await captureDesktopInput(options.localInput, options.imageAttachments, {
-      owner, fallbackText: options.prompt, cacheRoot: path.join(app.getPath('userData'), 'remote-desktop-inputs'), current,
+      owner, fallbackText: options.prompt, cacheRoot: path.join(app.getPath('userData'), 'remote-file-uploads'), current,
+      captureSnapshot: remoteBridge?.canCaptureRemoteFiles() === true,
       access: filePath => captureLibraryFileAccess(filePath),
     });
     if (current()) {

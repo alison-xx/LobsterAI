@@ -7,6 +7,7 @@ import type { ApprovalDecisionOutcome } from '../../shared/cowork/approval';
 import { OwnershipSyncState, OwnershipTargetKind } from '../../shared/ownership/constants';
 import type { OwnershipTarget } from '../../shared/ownership/types';
 import { REMOTE_AGENT_CATALOG_BYTES, REMOTE_AGENT_CATALOG_ITEMS, REMOTE_PROTOCOL_VERSION, REMOTE_TEXT_BYTES, type RemoteAgentCatalogItem, RemoteCapability, RemoteConnectionReason, type RemoteConnectionReasonValue, RemoteConnectionStatus, type RemoteOwner, type RemoteSettingsState, RemoteSyncConflict, RemoteSyncStatus, type RemoteWorkspace } from '../../shared/remote/constants';
+import { RemoteFileCapability } from '../../shared/remote/files';
 import { RemoteInputCapability, RemoteInputReason, RemoteInputStatus, type RemotePreparationClaim } from '../../shared/remote/input';
 import type { AgentOwnerStore } from '../agentOwnership';
 import { OwnershipAssociationStore, type OwnershipClaimBlocks } from '../ownershipAssociationStore';
@@ -15,6 +16,7 @@ import type { InputPreparationService } from './inputPreparationService';
 import type { RemoteIdentity } from './installationIdentity';
 import { type AgentWorkspace,RemoteAgentCatalog, RemoteAgentError } from './remoteAgentCatalog';
 import { approvalCommandError, RemoteApprovalError } from './remoteApproval';
+import { RemoteFileSync } from './remoteFileSync';
 import { RemoteInputError, type RemoteModelCatalog } from './remoteModelCatalog';
 import { type ProjectionRecord, RemoteStore, type SyncRow } from './remoteStore';
 import { REMOTE_SYNC_REQUEST_ID_HEADER, remoteSyncErrorMetadata, remoteSyncRequestId, remoteSyncRequestMetadata, remoteSyncResultMetadata } from './remoteSyncLog';
@@ -33,6 +35,7 @@ interface ControlIntent { createSessionAvailable?: boolean; id: string; enabled:
 interface SavedImport { importId: string; sessionId: string; baseSourceSeq: string; snapshotEpoch: number; expectedSourceSeq: string; expectedServerSeq: string; beginConfirmed?: boolean; manifest: any; parts: any[]; stateVersion?: string }
 export interface BridgeDependencies {
   input?: { models: RemoteModelCatalog; preparations: InputPreparationService };
+  files?: { cacheRoot: string; access(filePath: string): { assertAllowed(): void } };
   getAgentDefaultInput?(owner: RemoteOwner, deviceId: string, agentId: string): RemoteAgentCatalogItem['defaultInput'];
   store: RemoteStore; identity: RemoteIdentity;
   /** Session creation and inbox persistence share the outer commit/notification boundary. */
@@ -101,16 +104,38 @@ export class RemoteBridge {
   private inputCapabilities: string[] = [];
   private lastInputPublish = 0;
   private inputWork: Promise<void> | null = null;
+  private readonly files: RemoteFileSync | null;
+  private fileCapabilities: string[] = [];
+  private projectionVersion = 1;
+  private fileTimer: ReturnType<typeof setInterval> | null = null;
   constructor(private readonly deps: BridgeDependencies) {
+    this.files = deps.files ? new RemoteFileSync({ store: deps.store, ...deps.files, owner: deps.getOwner,
+      environment: () => this.remoteEnvironment(), enabled: () => this.settings().enabled && !this.stopped,
+      request: (connection, pathname, init) => {
+        if (!this.registration || connection.deviceId !== this.registration.deviceId || connection.generation !== this.generation
+          || !sameOwner(connection.owner, deps.getOwner()) || connection.environment !== this.remoteEnvironment() || !this.settings().enabled || this.stopped) throw new Error('FILE_WRITER_STALE');
+        return deps.request(connection.owner, `/api/remote/v1${pathname}`, { ...init, headers: { ...init.headers,
+          'X-Remote-Device-Credential': `${connection.deviceId}.${deps.identity.deviceKey}`, 'X-Remote-Connection-Generation': connection.generation,
+          'X-Remote-Projection-Version': String(this.projectionVersion) } });
+      } }) : null;
     this.ownershipAssociations = new OwnershipAssociationStore(deps.store);
     deps.store.setWake(() => this.schedule(1000));
     this.agentCatalog = deps.agentOwnership && deps.getAgentWorkspace ? new RemoteAgentCatalog(deps.store, deps.agentOwnership, deps.getAgentWorkspace,
       (owner, deviceId, agentId) => this.inputCapabilities.includes(RemoteInputCapability.Schema) ? deps.getAgentDefaultInput?.(owner, deviceId, agentId) : undefined) : null;
     deps.agentOwnership?.subscribe(() => { this.agentCatalogRevision++; this.schedule(300); });
   }
-  start(): void { this.stopped = false; this.accountChanged(); }
+  start(): void {
+    this.stopped = false; this.accountChanged();
+    if (this.files && !this.fileTimer) { this.fileTimer = setInterval(() => this.syncFiles(), 2000); this.fileTimer.unref?.(); }
+  }
+  private syncFiles(): void {
+    if (this.owner && this.registration && this.generation && this.projectionVersion === 3) this.files?.tick({ owner: this.owner,
+      deviceId: this.registration.deviceId, generation: this.generation, environment: this.remoteEnvironment() });
+  }
+  canCaptureRemoteFiles(): boolean { return this.files?.canCaptureInput() === true && this.settings().enabled; }
   getInputAgentCatalog(): RemoteAgentCatalog | null { return this.agentCatalog; }
-  stop(): void { this.stopped = true; if (this.timer) clearTimeout(this.timer); this.timer = null; this.disconnect(); }
+  stop(): void { this.stopped = true; if (this.timer) clearTimeout(this.timer); this.timer = null;
+    if (this.fileTimer) clearInterval(this.fileTimer); this.fileTimer = null; this.files?.pause(); this.disconnect(); }
   accountChanged(): void { this.ensureAccount(); this.schedule(0); }
   private changed(): void { this.deps.onStateChange?.(); }
   private settingsKey(): string { return `settings:${this.owner?.userId}:${this.owner?.scopeKey}`; }
@@ -221,6 +246,7 @@ export class RemoteBridge {
     this.connectionReason = RemoteConnectionReason.Connecting;
     this.deps.store.setEnabledOwner(null); this.disconnect();
     this.declaredDualApproval = false; this.deps.store.setApprovalProjectionSupported(false);
+    this.fileCapabilities = []; this.projectionVersion = 1; this.files?.configure(false); this.deps.store.setFileProjectionSupported(false);
     this.deps.configureDualApproval?.({ enabled: false, projectionSupported: false });
     this.deps.onAccountChange(previous, current); this.changed();
   }
@@ -291,7 +317,7 @@ export class RemoteBridge {
         catch { this.workspaceUnavailable = true; }
       }
       await this.ensureRegistration();
-      if ((this.agentCatalog || this.deps.supportsDualApproval) && Date.now() - this.lastCapabilityCheck > 45000) await this.refreshCapabilities();
+      if ((this.agentCatalog || this.deps.supportsDualApproval || this.files) && Date.now() - this.lastCapabilityCheck > 45000) await this.refreshCapabilities();
       await this.writeSettings();
       if (!sameOwner(owner, this.owner) || !sameOwner(owner, this.deps.getOwner())) return;
       if (!this.settings().enabled) { this.backoff = 30000; return; }
@@ -327,6 +353,7 @@ export class RemoteBridge {
       }
       await this.reconcile();
       await this.syncSessions();
+      this.syncFiles();
       if (this.generation && this.inputCapabilities.includes(RemoteInputCapability.Schema) && this.deps.input) {
         if (Date.now() - this.lastInputPublish > 15000) {
           await this.deps.input.models.publish(owner, this.registration!.deviceId, this.generation,
@@ -383,7 +410,8 @@ export class RemoteBridge {
     try {
       const headers: Record<string, string> = { 'Content-Type': 'application/json' };
       if (requestId) headers[REMOTE_SYNC_REQUEST_ID_HEADER] = requestId;
-      if (this.inputCapabilities.includes(RemoteInputCapability.Schema)) headers['X-Remote-Projection-Version'] = '2';
+      // Capability discovery always uses v1 so an older server can negotiate safely.
+      if (pathname !== '/capabilities' && this.projectionVersion > 1) headers['X-Remote-Projection-Version'] = String(this.projectionVersion);
       if (registrationRequired) {
         if (!this.registration) throw new Error('Device is not registered');
         headers['X-Remote-Device-Credential'] = `${this.registration.deviceId}.${this.deps.identity.deviceKey}`;
@@ -414,7 +442,7 @@ export class RemoteBridge {
   }
   private advertisedCapabilities(createSessionAvailable = true): string[] {
     const supported = this.declaredAgentCapabilities.includes(RemoteCapability.AgentSelection) || createSessionAvailable && this.settings().createSessionAvailable !== false ? capabilities : capabilities.filter(value => value !== RemoteCapability.CreateSession);
-    return [...(this.sameAccountAccess ? [...supported, RemoteCapability.SameAccountAccess] : supported), ...this.declaredAgentCapabilities, ...this.inputCapabilities, ...(this.declaredDualApproval ? [RemoteCapability.DualApproval] : [])];
+    return [...(this.sameAccountAccess ? [...supported, RemoteCapability.SameAccountAccess] : supported), ...this.declaredAgentCapabilities, ...this.inputCapabilities, ...this.fileCapabilities, ...(this.declaredDualApproval ? [RemoteCapability.DualApproval] : [])];
   }
   private async ensureRegistration(): Promise<void> {
     if (this.registration) return;
@@ -433,10 +461,16 @@ export class RemoteBridge {
       // Legacy servers still receive a saved disable; never announce an unsupported capability to them.
       if (!this.controls().some(intent => !intent.enabled)) throw new RemoteApiError(47000, 'Server upgrade required for same-account remote access');
     }
-    const previous = stableJson([this.declaredAgentCapabilities, this.declaredDualApproval]);
+    const previous = stableJson([this.declaredAgentCapabilities, this.declaredDualApproval, this.fileCapabilities]);
+    const previousProjectionVersion = this.projectionVersion;
     const supported = Array.isArray(support.capabilities) ? support.capabilities : [];
     this.inputCapabilities = this.deps.input ? Object.values(RemoteInputCapability).filter(value => supported.includes(value)) : [];
-    this.deps.store.setInputProjectionSupported(this.deps.input !== undefined && supported.includes(RemoteInputCapability.Schema));
+    this.fileCapabilities = this.files && support.projectionVersions?.includes(3) ? Object.values(RemoteFileCapability).filter(value => supported.includes(value)) : [];
+    const fileSupported = this.fileCapabilities.length === Object.values(RemoteFileCapability).length;
+    this.projectionVersion = fileSupported ? 3 : this.inputCapabilities.includes(RemoteInputCapability.Schema) ? 2 : 1;
+    this.files?.configure(fileSupported); this.deps.store.setFileProjectionSupported(fileSupported);
+    if (this.socket && previousProjectionVersion !== this.projectionVersion) this.disconnect();
+    this.deps.store.setInputProjectionSupported(fileSupported || this.deps.input !== undefined && supported.includes(RemoteInputCapability.Schema));
     this.agentCapabilities = this.agentCatalog && supported.includes(RemoteCapability.SessionAgent) ? [RemoteCapability.SessionAgent] : [];
     this.ownershipClaimCapability = { environment, owner: { ...this.owner! },
       enabled: this.agentCapabilities.includes(RemoteCapability.SessionAgent) && supported.includes(RemoteCapability.AgentOwnershipClaim) };
@@ -465,7 +499,7 @@ export class RemoteBridge {
     this.deps.configureDualApproval?.({ enabled: dualEnabled, projectionSupported: this.declaredDualApproval });
     this.lastCapabilityCheck = Date.now();
     if (this.registration && this.settings().enabled) this.ownershipClaimBlocks();
-    if (this.registration && previous !== stableJson([this.declaredAgentCapabilities, this.declaredDualApproval])) this.queueControl(this.settings());
+    if (this.registration && previous !== stableJson([this.declaredAgentCapabilities, this.declaredDualApproval, this.fileCapabilities])) this.queueControl(this.settings());
   }
   private async register(): Promise<void> {
     await this.refreshCapabilities();
@@ -536,7 +570,7 @@ export class RemoteBridge {
     const owner = this.owner;
     let ticket: any;
     try { ticket = await this.api('/connection-tickets', 'POST', { protocolVersion: REMOTE_PROTOCOL_VERSION,
-      ...(this.inputCapabilities.includes(RemoteInputCapability.Schema) ? { projectionVersion: 2 } : {}) }); }
+      ...(this.projectionVersion > 1 ? { projectionVersion: this.projectionVersion } : {}) }); }
     catch (error) { if (attempt !== this.connectionAttempt) return; throw error; }
     if (attempt !== this.connectionAttempt || this.stopped || !sameOwner(owner, this.owner) || !sameOwner(owner, this.deps.getOwner()) || !this.settings().enabled) return;
     const url = new URL(ticket.wsUrl);
@@ -555,6 +589,10 @@ export class RemoteBridge {
         const frame = JSON.parse(data);
         if (frame.type === 'hello') {
           if (frame.protocolVersion !== REMOTE_PROTOCOL_VERSION || !/^[1-9]\d*$/u.test(String(frame.connectionGeneration))) throw new Error('Invalid remote handshake');
+          if (this.projectionVersion === 3 && frame.projectionVersion !== 3) {
+            this.projectionVersion = frame.projectionVersion === 2 ? 2 : 1;
+            this.files?.configure(false); this.deps.store.setFileProjectionSupported(false);
+          }
           if (this.handshake) clearTimeout(this.handshake); this.handshake = null;
           this.generation = String(frame.connectionGeneration); this.lastPong = Date.now();
           this.heartbeatTimeout = Math.min(90000, Math.max(20000, (Number(frame.heartbeatTimeoutSeconds) || 75) * 1000));
