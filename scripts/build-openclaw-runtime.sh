@@ -50,8 +50,9 @@ esac
 
 WORK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/openclaw-runtime.XXXXXX")"
 PACK_DIR="$WORK_DIR/pack"
+WORKSPACE_PACK_DIR="$WORK_DIR/workspace-packages"
 EXTRACT_DIR="$WORK_DIR/extract"
-mkdir -p "$PACK_DIR" "$EXTRACT_DIR"
+mkdir -p "$PACK_DIR" "$WORKSPACE_PACK_DIR" "$EXTRACT_DIR"
 
 cleanup() {
   if [[ "${OPENCLAW_CHANGELOG_PREPARED:-0}" == "1" && -d "${OPENCLAW_SRC:-}" ]]; then
@@ -117,6 +118,11 @@ PATCH_HASH=""
 if [[ -d "$PATCHES_DIR" ]]; then
   PATCH_HASH=$(cat "$PATCHES_DIR"/*.patch 2>/dev/null | sha256sum | cut -d' ' -f1)
 fi
+# Packaging fixes must invalidate cached runtimes even when source patches and
+# the pinned OpenClaw version have not changed.
+BUILD_SCRIPT_HASH=$(cat "$SCRIPT_DIR/build-openclaw-runtime.sh" \
+  "$SCRIPT_DIR/openclaw-runtime-workspace-deps.cjs" \
+  "$SCRIPT_DIR/openclaw-runtime-packaging.cjs" | sha256sum | cut -d' ' -f1)
 
 if [[ -n "$DESIRED_VERSION" && "${OPENCLAW_FORCE_BUILD:-}" != "1" ]]; then
   BUILD_INFO="$OUT_DIR/runtime-build-info.json"
@@ -135,7 +141,14 @@ try {
 } catch {}
 READPH
     )
-    if [[ "$BUILT_VERSION" == "$DESIRED_VERSION" && "$BUILT_PATCH_HASH" == "$PATCH_HASH" ]]; then
+    BUILT_SCRIPT_HASH=$(node - "$BUILD_INFO" <<'READSH'
+try {
+  const info = require(process.argv[2]);
+  console.log(info.buildScriptHash || '');
+} catch {}
+READSH
+    )
+    if [[ "$BUILT_VERSION" == "$DESIRED_VERSION" && "$BUILT_PATCH_HASH" == "$PATCH_HASH" && "$BUILT_SCRIPT_HASH" == "$BUILD_SCRIPT_HASH" ]]; then
       if [[ -d "$OUT_DIR/node_modules" && -f "$OUT_DIR/gateway.asar" && -f "$OUT_DIR/dist/control-ui/index.html" ]]; then
         echo "[openclaw-runtime] Already built for $DESIRED_VERSION (target=$TARGET_ID, patchHash=${PATCH_HASH:0:12}…), skipping."
         echo "[openclaw-runtime] Use OPENCLAW_FORCE_BUILD=1 to force rebuild."
@@ -145,6 +158,9 @@ READPH
     fi
     if [[ "$BUILT_VERSION" == "$DESIRED_VERSION" && "$BUILT_PATCH_HASH" != "$PATCH_HASH" ]]; then
       echo "[openclaw-runtime] Patches changed (was=${BUILT_PATCH_HASH:0:12}…, now=${PATCH_HASH:0:12}…), rebuilding."
+    fi
+    if [[ "$BUILT_SCRIPT_HASH" != "$BUILD_SCRIPT_HASH" ]]; then
+      echo "[openclaw-runtime] Runtime build scripts changed or metadata is missing; rebuilding."
     fi
   fi
   echo "[openclaw-runtime] Pinned version: $DESIRED_VERSION (current build: ${BUILT_VERSION:-none})"
@@ -186,6 +202,17 @@ echo "[2/7] Packing npm tarball"
 # to publishable versions; npm pack leaves them unresolved.
 pnpm --config.ignore-scripts=true pack --pack-destination "$PACK_DIR"
 restore_openclaw_package_changelog
+# pnpm pack rewrites workspace:* to registry versions; it does not include the
+# locally patched dependency builds. Pack the production workspace closure from
+# this same build and install those tarballs instead of the published versions.
+WORKSPACE_PACKAGE_LIST="$WORK_DIR/workspace-packages.tsv"
+node "$SCRIPT_DIR/openclaw-runtime-workspace-deps.cjs" list "$OPENCLAW_SRC" > "$WORKSPACE_PACKAGE_LIST"
+while IFS=$'\t' read -r PACKAGE_DIR PACKAGE_TARBALL; do
+  [[ -n "$PACKAGE_DIR" ]] || continue
+  pushd "$OPENCLAW_SRC/$PACKAGE_DIR" >/dev/null
+  pnpm --config.ignore-scripts=true pack --out "$WORKSPACE_PACK_DIR/$PACKAGE_TARBALL"
+  popd >/dev/null
+done < "$WORKSPACE_PACKAGE_LIST"
 TARBALL="$(ls -1t "$PACK_DIR"/openclaw-*.tgz | head -n 1)"
 if [[ -z "$TARBALL" || ! -f "$TARBALL" ]]; then
   echo "Failed to locate packed tarball in $PACK_DIR" >&2
@@ -207,7 +234,7 @@ cp -R "$PKG_DIR" "$OUT_DIR"
 
 # Save build metadata for traceability.
 # Use `node -` so stdin is treated as script and the following args remain user args.
-node - "$OUT_DIR" "$OPENCLAW_SRC" "$TARGET_ID" "$ELECTRON_ROOT" "$PATCH_HASH" <<'NODE'
+node - "$OUT_DIR" "$OPENCLAW_SRC" "$TARGET_ID" "$ELECTRON_ROOT" "$PATCH_HASH" "$BUILD_SCRIPT_HASH" <<'NODE'
 const fs = require('fs');
 const path = require('path');
 const { execFileSync } = require('child_process');
@@ -216,6 +243,7 @@ const src = process.argv[3];
 const target = process.argv[4];
 const electronRoot = process.argv[5];
 const patchHash = process.argv[6] || '';
+const buildScriptHash = process.argv[7] || '';
 
 // Read pinned version from package.json
 let openclawVersion = '';
@@ -241,6 +269,7 @@ const meta = {
   openclawVersion,
   openclawCommit,
   patchHash,
+  buildScriptHash,
 };
 fs.writeFileSync(path.join(outDir, 'runtime-build-info.json'), JSON.stringify(meta, null, 2) + '\n');
 NODE
@@ -251,6 +280,7 @@ rm -rf node_modules package-lock.json
 
 # Avoid npm peer resolution conflicts caused by dev-only lint toolchain.
 npm pkg delete devDependencies >/dev/null 2>&1 || true
+node "$SCRIPT_DIR/openclaw-runtime-workspace-deps.cjs" stage "$OPENCLAW_SRC" "$OUT_DIR" "$WORKSPACE_PACK_DIR"
 
 echo "[openclaw-runtime] npm target platform=$NPM_TARGET_PLATFORM arch=$NPM_TARGET_ARCH"
 # @mistralai/mistralai@2.6.4 treats the OpenTelemetry API as an optional peer,
