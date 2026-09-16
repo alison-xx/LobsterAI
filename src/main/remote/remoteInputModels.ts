@@ -1,4 +1,6 @@
 import { OpenClawProviderId } from '../../shared/providers/constants';
+import { supportsLobsterAIRequestOptionsV1 } from '../../shared/providers/lobsterAIRequestOptions';
+import { RemoteModelUnavailableReason } from '../../shared/remote/input';
 import { evaluateServerModelRunGate, getAllServerModelMetadata, resolveAllEnabledProviderConfigs } from '../libs/claudeSettings';
 import { buildProviderSelection } from '../libs/openclawConfigSync';
 import type { LocalRemoteModel } from './remoteModelCatalog';
@@ -19,11 +21,16 @@ export function listRemoteInputModels(server: { token: string | null; baseURL: s
   }
   for (const model of getAllServerModelMetadata()) {
     const gate = evaluateServerModelRunGate(model.modelId);
+    const permitted = Boolean(server.token) && model.accessible !== false;
+    const available = permitted && gate.allowed;
+    const thinking = available && supportsLobsterAIRequestOptionsV1(model.requestCapabilities) ? model.thinkingConfig : undefined;
     items.push({ identity: JSON.stringify([OpenClawProviderId.LobsteraiServer, model.modelId]),
       runtimeRef: `${OpenClawProviderId.LobsteraiServer}/${model.modelId}`, source: 'subscription',
-      displayName: model.modelName || model.modelId, providerLabel: 'LobsterAI', available: Boolean(server.token) && gate.allowed,
+      displayName: model.modelName || model.modelId, providerLabel: 'LobsterAI', available,
+      unavailableReason: !permitted ? RemoteModelUnavailableReason.PermissionDenied
+        : !gate.allowed ? RemoteModelUnavailableReason.Unsupported : null,
       image: model.supportsImage === true, toolCalling: model.supportsToolCalling === true,
-      thinking: model.thinkingConfig ? { options: model.thinkingConfig.options.map(option => option.level), default: model.thinkingConfig.defaultLevel } : { options: [] },
+      thinking: thinking ? { options: thinking.options.map(option => option.level), default: thinking.defaultLevel } : { options: [] },
       configuration: JSON.parse(JSON.stringify({ model, server })) });
   }
   return items;

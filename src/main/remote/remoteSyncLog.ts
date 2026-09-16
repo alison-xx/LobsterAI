@@ -7,7 +7,7 @@ const SyncOperation = {
   Batch: 'batch', Begin: 'import.begin', Status: 'import.status', Part: 'import.part',
   Commit: 'import.commit', Abort: 'import.abort',
 } as const;
-const eventTypes = new Set(['session.upsert', 'session.deleted', 'message.upsert', 'message.deleted', 'tool.upsert', 'run.updated', 'approval.updated']);
+const eventTypes = new Set(['session.upsert', 'session.deleted', 'message.upsert', 'message.delta', 'message.deleted', 'tool.upsert', 'run.updated', 'approval.updated']);
 const lifecycleStates = new Set(['starting', 'running', 'waiting_approval', 'waiting_local', 'cancelling', 'reconciling', 'succeeded', 'failed', 'cancelled', 'interrupted', 'pending', 'approved', 'rejected', 'expired', 'streaming', 'complete', 'error', 'queued', 'waiting_user', 'unavailable', 'uploading', 'committed', 'aborted']);
 const validationMessages = new Set([
   'Remote ACK outside durable local bounds', 'Remote batch ACK identity mismatch',

@@ -864,6 +864,22 @@ test('updateMessage preserves the session updated time', () => {
   expect(session?.messages[0]?.content).toBe('final');
 });
 
+test('updateMessage keeps rendered tool details and cannot replace remote attribution', () => {
+  const sid = 'sess-display-patch';
+  insertSession(sid);
+  insertMessage('result-patch', sid, 'tool_result', 'partial', JSON.stringify({
+    toolUseId: 'call', toolName: 'Read', isStreaming: true, remoteRunId: 'run', remoteCommandId: 'command',
+    toolResultDetails: { assets: ['image'], pollCount: 4, status: 'running' },
+  }), 1);
+  store.updateMessage(sid, 'result-patch', { content: 'final', metadata: {
+    isStreaming: false, isFinal: true, remoteRunId: 'forged',
+    toolResultDetails: { pollCount: 2, status: 'succeeded' },
+  } });
+  const row = db.prepare('SELECT metadata FROM cowork_messages WHERE id=?').get('result-patch') as { metadata: string };
+  expect(JSON.parse(row.metadata)).toEqual({ toolUseId: 'call', toolName: 'Read', isStreaming: false, isFinal: true,
+    remoteRunId: 'run', remoteCommandId: 'command', toolResultDetails: { assets: ['image'], pollCount: 4, status: 'succeeded' } });
+});
+
 test('addMessage refreshes the session updated time only for user messages', () => {
   const sid = 'sess-add-message-time';
   insertSession(sid);

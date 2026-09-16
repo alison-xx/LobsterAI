@@ -16,6 +16,13 @@ function fixture() {
     change: (patch: Partial<LocalRemoteModel>) => { models = [{ ...models[0], ...patch }]; }, remove: () => { models = []; } };
 }
 describe('remote model references', () => {
+  it('keeps selectable models usable without asserting tool-calling support', () => {
+    const { catalog, change } = fixture();
+    change({ toolCalling: false });
+    const item = catalog.refresh(owner, 'pc')[0];
+    expect(item).toMatchObject({ available: true, unavailableReason: null, inputCapabilities: { toolCalling: false } });
+    expect(catalog.resolve(owner, 'pc', item.modelRef, item.version).item).toEqual(item);
+  });
   it('limits public labels to server UTF-16 units without splitting emoji', () => {
     const { catalog, change } = fixture();
     change({ displayName: 'x' + '🦞'.repeat(100), providerLabel: '🦞'.repeat(100) });

@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { OwnershipSyncState, OwnershipTargetKind } from '../../shared/ownership/constants';
 import { RemoteCapability } from '../../shared/remote/constants';
+import { RemoteReply } from '../../shared/remote/reply';
 import { OwnershipAssociationStore } from '../ownershipAssociationStore';
 import { payloadHash } from './canonical';
 import { RemoteAgentError } from './remoteAgentCatalog';
@@ -172,6 +173,37 @@ describe('session synchronization recovery', () => {
     expect(store.pending('sync-task')).toEqual([]);
     expect(bridge.associationSyncState({ kind: OwnershipTargetKind.Task, id: 'sync-task' })).toBe(OwnershipSyncState.Synced);
     expect(bridge.state().error).toBeUndefined();
+  });
+
+  it('pauses quota failures without dropping content and allows an explicit reconnect to retry', async () => {
+    const { bridge, store, requestApi } = syncing();
+    vi.spyOn(bridge, 'schedule').mockImplementation(() => undefined);
+    requestApi.mockRejectedValueOnce(new RemoteApiError(47012, 'quota exceeded', { reason: 'REPLY_CONTENT_QUOTA_EXCEEDED' }, 413));
+    await bridge.syncSessions();
+    const saved = store.get<any>('import:sync-task');
+    const failure = store.get<any>('syncFailure:sync-task');
+    store.put('syncFailure:sync-task', { ...failure, retryAt: 0 });
+    await bridge.syncSessions();
+    expect(requestApi).toHaveBeenCalledTimes(1);
+    expect(store.get<any>('import:sync-task')?.importId).toBe(saved.importId);
+    await bridge.configure({ retry: true });
+    await bridge.syncSessions();
+    expect(store.get('syncFailure:sync-task')).toBeNull();
+    expect(store.get('import:sync-task')).toBeNull();
+  });
+
+  for (const change of ['stop', 'account', 'projection'] as const) it(`stops a snapshot publication when ${change} changes after content upload`, async () => {
+    const { bridge, store, requestApi } = syncing();
+    vi.spyOn(bridge, 'uploadReplyContents').mockImplementation(async () => {
+      if (change === 'stop') bridge.stop();
+      else if (change === 'account') bridge.deps.getOwner = () => ({ userId: 'other', scopeKey: 'personal' });
+      else bridge.projectionVersion = 4;
+    });
+    await bridge.syncSessions();
+    expect(requestApi).toHaveBeenCalledTimes(1);
+    expect(requestApi.mock.calls[0][1]).toBe('/api/remote/v1/sync/imports');
+    expect(store.get<any>('import:sync-task')?.beginConfirmed).toBe(true);
+    expect(store.sync('sync-task')!.ack_seq).toBe(0);
   });
 
   it('clears a previous failure when begin returns an already committed import', async () => {
@@ -348,6 +380,7 @@ describe('temporary rollout unavailability', () => {
       vi.spyOn(bridge, 'schedule').mockImplementation(() => undefined);
       const registration = vi.spyOn(bridge, 'ensureRegistration').mockRejectedValueOnce(new RemoteApiError(code, 'temporarily unavailable')).mockResolvedValue(undefined);
       vi.spyOn(bridge, 'connect').mockResolvedValue(undefined);
+      vi.spyOn(bridge, 'refreshCapabilities').mockResolvedValue(undefined);
       vi.spyOn(bridge, 'pollAccess').mockResolvedValue(undefined);
       vi.spyOn(bridge, 'reconcile').mockResolvedValue(undefined);
       const sync = vi.spyOn(bridge, 'syncSessions').mockResolvedValue(undefined);
@@ -522,4 +555,42 @@ it('waits for verified Gateway readiness and discovers it automatically without 
   expect(bridge.advertisedCapabilities()).toContain(RemoteCapability.DualApproval);
   expect(bridge.deps.configureDualApproval).toHaveBeenLastCalledWith({ enabled: false, projectionSupported: true });
   bridge.stop();
+});
+
+
+describe('v4 reply negotiation', () => {
+  it('enables replies only with both the projection version and capability, then rebuilds on downgrade', async () => {
+    const { bridge, store, requestApi } = fixture();
+    requestApi.mockImplementation(async () => new Response(JSON.stringify({ code: 0, data: {
+      enabled: true, protocolVersions: [1], projectionVersions: [1, 2, 3, 4], capabilities: [RemoteCapability.SameAccountAccess, RemoteReply.Capability],
+    } })));
+    await bridge.refreshCapabilities();
+    expect(bridge.projectionVersion).toBe(RemoteReply.ProjectionVersion);
+    expect(bridge.advertisedCapabilities()).toContain(RemoteReply.Capability);
+    requestApi.mockImplementation(async () => new Response(JSON.stringify({ code: 0, data: {
+      enabled: true, protocolVersions: [1], projectionVersions: [1, 2, 3], capabilities: [RemoteCapability.SameAccountAccess, RemoteReply.Capability],
+    } })));
+    await bridge.refreshCapabilities();
+    expect(bridge.projectionVersion).toBe(1);
+    expect(bridge.advertisedCapabilities()).not.toContain(RemoteReply.Capability);
+    expect(store).toBeDefined(); bridge.stop();
+  });
+  it('aborts an outstanding old projection import before rebuilding a v4 snapshot', async () => {
+    const { bridge, store, requestApi } = fixture();
+    bridge.replySupported = true; bridge.projectionVersion = RemoteReply.ProjectionVersion;
+    store.db.exec("INSERT INTO cowork_sessions VALUES ('switch','Task',1,1,'idle')");
+    store.transaction(() => { store.assignNew('switch', owner, 'local_create'); store.bindRemote('switch', 'remote-switch', 'desktop'); });
+    const saved = { importId: 'old-import', sessionId: 'remote-switch', projectionVersion: 3, beginConfirmed: true,
+      snapshotEpoch: 1, parts: [], manifest: { recordCounts: {} } };
+    store.put('import:switch', saved);
+    const paths: string[] = [];
+    requestApi.mockImplementation(async (_owner, pathname) => {
+      paths.push(pathname);
+      return new Response(JSON.stringify({ code: 0, data: pathname.endsWith('/abort') ? {} : { state: 'uploading', stateVersion: '3' } }));
+    });
+    await bridge.importSession(store.sync('switch'), saved);
+    expect(paths).toEqual(['/api/remote/v1/sync/imports/old-import', '/api/remote/v1/sync/imports/old-import/abort']);
+    expect(store.get('import:switch')).toBeNull();
+    expect(store.sync('switch')?.needs_snapshot).toBe(1); bridge.stop();
+  });
 });

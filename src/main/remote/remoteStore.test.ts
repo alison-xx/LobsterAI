@@ -258,3 +258,104 @@ it('does not retrofit resolution into an already published legacy approval at th
   const events = store.pending('s').filter(event => event.eventType === 'approval.updated');
   expect(events.at(-1)?.payload.approval).toMatchObject({ approvalVersion: '3', resolution: { confirmedDecision: 'approve' } });
 });
+
+
+describe('reply content v4 durable projection', () => {
+  function enabled(): RemoteStore {
+    const store = fixture(); store.setEnabledOwner(owner); store.setReplyProjectionSupported(true); create(store, 's'); return store;
+  }
+  function insert(store: RemoteStore, id: string, type: string, content: string, metadata: Record<string, unknown>, sequence: number): void {
+    store.transaction(() => store.db.prepare('INSERT INTO cowork_messages VALUES (?, ?, ?, ?, ?, 2, ?)').run(id, 's', type, content, JSON.stringify(metadata), sequence));
+  }
+  function projected(store: RemoteStore, id = 'm'): any {
+    return store.snapshot('s').records.find(record => record.eventType === 'message.upsert' && record.payload.message.messageId === id)!.payload.message;
+  }
+  it('keeps full snapshots while publishing append deltas and immutable old events', () => {
+    const store = enabled(); insert(store, 'm', 'assistant', '中', { isStreaming: true }, 1);
+    const old = store.pending('s').find(event => event.eventType === 'message.upsert')!;
+    store.transaction(() => store.db.prepare("UPDATE cowork_messages SET content='中文😀' WHERE id='m'").run());
+    const delta = store.pending('s').find(event => event.eventType === 'message.delta')!;
+    expect(delta.payload).toMatchObject({ messageId: 'm', baseRevision: '1', revision: '2', offsetBytes: '3', text: '文😀' });
+    expect(projected(store).blocks[0].text).toBe('中文😀');
+    expect(store.pending('s').find(event => event.eventId === old.eventId)).toEqual(old);
+  });
+  it('retains thinking/system messages and updates display order without changing legacy ordinal', () => {
+    const store = enabled(); insert(store, 'm', 'assistant', 'answer', {}, 1);
+    const old = projected(store);
+    store.transaction(() => {
+      store.db.prepare("UPDATE cowork_messages SET sequence=2 WHERE id='m'").run();
+      store.db.prepare("INSERT INTO cowork_messages VALUES ('thinking','s','assistant','reason',?,1,1)").run(JSON.stringify({ isThinking: true }));
+    });
+    insert(store, 'notice', 'system', 'Compacting context', { kind: 'context_compaction', status: 'running' }, 3);
+    expect(projected(store).ordinal).toBe(old.ordinal); expect(projected(store).displayOrdinal).toBe('2');
+    expect(projected(store, 'thinking').blocks[0]).toMatchObject({ type: 'thinking', text: 'reason' });
+    expect(projected(store, 'notice').blocks[0]).toMatchObject({ type: 'notice', text: 'Compacting context' });
+  });
+  it('does not mark partial tool results as success or lose the original tool name', () => {
+    const store = enabled(); insert(store, 'call', 'tool_use', 'Using tool', { toolUseId: 'tool', toolName: 'Bash', toolInput: { command: 'pwd' } }, 1);
+    insert(store, 'result', 'tool_result', '/tmp', { toolUseId: 'tool', isStreaming: true, isFinal: false }, 2);
+    let tool = store.snapshot('s').records.find(record => record.eventType === 'tool.upsert')!.payload.tool;
+    expect(tool).toMatchObject({ name: 'Bash', status: 'running', finishedAt: null });
+    expect(projected(store, 'result').blocks[0]).toMatchObject({ type: 'tool_output', text: '/tmp', toolName: 'Bash' });
+    store.transaction(() => store.db.prepare("UPDATE cowork_messages SET metadata=? WHERE id='result'").run(JSON.stringify({ toolUseId: 'tool', isFinal: true, isStreaming: false })));
+    tool = store.snapshot('s').records.find(record => record.eventType === 'tool.upsert')!.payload.tool;
+    expect(tool).toMatchObject({ name: 'Bash', status: 'succeeded' });
+  });
+  it('preserves large replies in durable versioned chunks, including versions held by pending imports', () => {
+    const store = enabled(); const first = '中文😀'.repeat(80000); insert(store, 'm', 'assistant', first, {}, 1);
+    const firstRecord = store.snapshot('s').records.find(record => record.eventType === 'message.upsert')!;
+    expect(firstRecord.payload.message.contentState).toBe('complete');
+    const firstUpload = store.replyContentUploads('s', [firstRecord])[0];
+    expect(firstUpload.chunks.map(chunk => chunk.text).join('')).toBe(first);
+    store.put('import:s', { parts: [{ payload: { records: [firstRecord] } }] });
+    store.transaction(() => store.db.prepare("UPDATE cowork_messages SET content=? WHERE id='m'").run(first + 'changed'));
+    const second = projected(store).blocks[0].contentRef;
+    expect(second.version).toBe('2');
+    const sync = store.sync('s')!; store.bindRemote('s', sync.session_id, 'device'); store.acknowledge('s', 'device', sync.session_id, String(sync.source_seq), '1');
+    expect(store.replyContentUploads('s', [firstRecord])[0].version).toBe('1');
+    store.remove('import:s'); store.pruneReplyContents('s');
+    expect(() => store.replyContentUploads('s', [firstRecord])).toThrow('no matching durable');
+    const retained = store.replyContentUploads('s', store.snapshot('s').records)[0];
+    expect(retained.chunks.map(chunk => chunk.text).join('')).toBe(first + 'changed');
+  });
+  it('requires a new snapshot when changing reply capability without rewriting pending events', () => {
+    const store = fixture(); store.setEnabledOwner(owner); create(store, 's'); message(store, 'body');
+    const old = store.pending('s'); const epoch = store.snapshot('s').snapshotEpoch;
+    store.setReplyProjectionSupported(true);
+    expect(store.snapshot('s').snapshotEpoch).toBeGreaterThan(epoch);
+    expect(store.pending('s').slice(0, old.length)).toEqual(old);
+    store.setReplyProjectionSupported(false);
+    expect(projected(store).projectionVersion).toBeUndefined();
+  });
+  it('publishes final reply content before terminal run/session state and wakes urgently', () => {
+    const store = enabled(); store.beginRun('s', 'run'); insert(store, 'm', 'assistant', 'starting', { remoteRunId: 'run', isStreaming: true }, 1);
+    const boundary = store.sync('s')!.source_seq; const wake: boolean[] = []; store.setWake(urgent => wake.push(Boolean(urgent)));
+    store.transaction(() => {
+      store.db.prepare("UPDATE cowork_messages SET content='done',metadata=? WHERE id='m'").run(JSON.stringify({ remoteRunId: 'run', isStreaming: false }));
+      store.updateRun('s', 'succeeded');
+    });
+    const events = store.pending('s').filter(event => Number(event.sourceSeq) > boundary);
+    expect(events.findIndex(event => event.eventType === 'message.upsert')).toBeLessThan(events.findIndex(event => event.eventType === 'run.updated'));
+    expect(wake).toContain(true);
+  });
+});
+
+
+it('explicitly marks oversized reply content without stopping durable local projection', () => {
+  const store = fixture(); store.setEnabledOwner(owner); store.setReplyProjectionSupported(true); create(store, 's');
+  message(store, 'x'.repeat(16 * 1024 * 1024 + 1));
+  const result = store.snapshot('s').records.find(record => record.eventType === 'message.upsert')!.payload.message;
+  expect(result).toMatchObject({ projectionVersion: 4, contentState: 'desktop_only', contentUnavailableReason: 'CONTENT_LIMIT_EXCEEDED', blocks: [] });
+  expect(store.db.prepare("SELECT length(content) AS n FROM cowork_messages WHERE id='m'").get()).toEqual({ n: 16 * 1024 * 1024 + 1 });
+});
+
+
+it('downgrades persisted v4 projections through a snapshot after process restart', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'remote-reply-restart-')); directories.push(dir);
+  const file = path.join(dir, 'db.sqlite'); const first = fixture(file); first.setEnabledOwner(owner); first.setReplyProjectionSupported(true); create(first, 's'); message(first, 'body');
+  const before = first.snapshot('s').snapshotEpoch; first.db.close();
+  const reopened = fixture(file); reopened.setEnabledOwner(owner); reopened.setReplyProjectionSupported(false);
+  const snapshot = reopened.snapshot('s');
+  expect(snapshot.snapshotEpoch).toBeGreaterThan(before);
+  expect(snapshot.records.find(record => record.eventType === 'message.upsert')!.payload.message.projectionVersion).toBeUndefined();
+});

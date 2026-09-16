@@ -84,6 +84,7 @@ export type ServerModelMetadata = {
   contextWindow?: number;
   maxTokens?: number;
   explicitContextCache?: boolean;
+  accessible?: boolean;
 };
 
 type CachedServerModelMetadata = Omit<ServerModelMetadata, 'modelId'> & {
@@ -197,6 +198,7 @@ const serializeServerModelMetadata = (
       contextWindow: model.contextWindow,
       maxTokens: model.maxTokens,
       explicitContextCache: model.explicitContextCache,
+      accessible: model.accessible,
     }))
     .sort((a, b) => a.modelId.localeCompare(b.modelId)),
 );
@@ -219,6 +221,7 @@ const getComparableServerModelMetadata = (
   contextWindow: meta.contextWindow,
   maxTokens: meta.maxTokens,
   explicitContextCache: meta.explicitContextCache,
+  accessible: meta.accessible,
 }));
 
 export function updateServerModelMetadata(models: ServerModelMetadataInput[]): boolean {
@@ -270,6 +273,7 @@ export function updateServerModelMetadata(models: ServerModelMetadataInput[]): b
       contextWindow: runtimeMetadata.contextWindow,
       maxTokens: runtimeMetadata.maxTokens,
       explicitContextCache: model.explicitContextCache,
+      accessible: model.accessible,
     });
   }
   const next = serializeServerModelMetadata(getComparableServerModelMetadata(nextCache));
@@ -298,6 +302,7 @@ export function getAllServerModelMetadata(): ServerModelMetadata[] {
     contextWindow: meta.contextWindow,
     maxTokens: meta.maxTokens,
     explicitContextCache: meta.explicitContextCache,
+    accessible: meta.accessible,
   }));
 }
 
@@ -322,6 +327,7 @@ export function getServerModelMetadata(modelId: string): ServerModelMetadata | n
     contextWindow: metadata.contextWindow,
     maxTokens: metadata.maxTokens,
     explicitContextCache: metadata.explicitContextCache,
+    accessible: metadata.accessible,
   };
 }
 

@@ -1,10 +1,12 @@
 import type Database from 'better-sqlite3';
-import { randomUUID } from 'crypto';
+import { createHash, randomUUID } from 'crypto';
 
 import { OWNERSHIP_MANUAL_SOURCE } from '../../shared/ownership/constants';
 import { REMOTE_MESSAGE_BYTES, type RemoteAgentSummary, type RemoteOwner, type RemoteRunStatusValue } from '../../shared/remote/constants';
+import { RemoteReply, RemoteReplyBlockType, type RemoteReplyContentRef, type RemoteReplyFormat, type RemoteReplyUpload } from '../../shared/remote/reply';
 import { payloadHash, remoteError, sameOwner, stableJson } from './canonical';
 import type { DesktopInputRun } from './desktopInputMetadata';
+import { isPublicReplyMessage, redactReplyText,replyAppendDelta, replyBlockId, replyBlocks, replyChunks, replyToolState } from './remoteReplyProjection';
 import { remoteSyncErrorMetadata } from './remoteSyncLog';
 
 export interface ProjectionRecord { eventType: string; payload: Record<string, any> }
@@ -40,13 +42,15 @@ export class RemoteStore {
   private approvalProjectionSupported = false;
   private inputProjectionSupported = false;
   private fileProjectionSupported = false;
+  private replyProjectionSupported = false;
   private fileEnvironment: string | null = null;
   private fileTerminalBoundary: ((sessionId: string, runId: string) => void) | null = null;
   private artifactProjection: ((sessionId: string, messageId: string) => Array<{ localArtifactId: string; block: Record<string, unknown> }>) | null = null;
   private approvalLifecycle: { expire(now: number): void; close(sessionId: string, runId: string, status: string): void } | null = null;
   private advanceCheckpoint: (() => number) | null = null;
   private enabledOwner: RemoteOwner | null = null;
-  private wake: () => void = () => undefined;
+  private wake: (urgent?: boolean) => void = () => undefined;
+  private urgentReplyChange = false;
   private agentSummary: ((sessionId: string, owner: RemoteOwner) => RemoteAgentSummary | null) | null = null;
 
   constructor(readonly db: Database.Database) {
@@ -72,6 +76,10 @@ export class RemoteStore {
       CREATE TABLE IF NOT EXISTS remote_projection (
         session_id TEXT NOT NULL, object_key TEXT NOT NULL, hash TEXT NOT NULL,
         revision INTEGER NOT NULL, record_json TEXT NOT NULL, PRIMARY KEY(session_id,object_key));
+      CREATE TABLE IF NOT EXISTS remote_reply_contents (session_id TEXT NOT NULL, content_id TEXT NOT NULL, version INTEGER NOT NULL,
+        message_id TEXT NOT NULL, block_id TEXT NOT NULL, format TEXT NOT NULL, sha256 TEXT NOT NULL, chunks_json TEXT NOT NULL, size_bytes INTEGER NOT NULL,
+        PRIMARY KEY(session_id,content_id,version));
+      CREATE TABLE IF NOT EXISTS remote_reply_chunks(session_id TEXT NOT NULL, sha256 TEXT NOT NULL, content TEXT NOT NULL, size_bytes INTEGER NOT NULL, PRIMARY KEY(session_id,sha256));
       CREATE TABLE IF NOT EXISTS remote_source_owner (source_id TEXT PRIMARY KEY, owner_json TEXT NOT NULL);
     `);
     for (const table of ['cowork_sessions', 'cowork_messages']) {
@@ -116,7 +124,7 @@ export class RemoteStore {
     }
   }
 
-  setWake(listener: () => void): void { this.wake = listener; }
+  setWake(listener: (urgent?: boolean) => void): void { this.wake = listener; }
   setFileTerminalBoundary(listener: (sessionId: string, runId: string) => void): void { this.fileTerminalBoundary = listener; }
   setFileEnvironment(environment: string): void { this.fileEnvironment = environment; }
   setArtifactProjectionResolver(resolver: NonNullable<RemoteStore['artifactProjection']>): void { this.artifactProjection = resolver; }
@@ -128,6 +136,68 @@ export class RemoteStore {
     if (supported === this.fileProjectionSupported) return;
     this.fileProjectionSupported = supported;
     for (const { session_id } of this.db.prepare("SELECT session_id FROM cowork_session_ownership WHERE ownership_status='confirmed'").all() as Array<{ session_id: string }>) this.markFilesDirty(session_id);
+  }
+  /** Changing the wire projection requires an atomic snapshot, never mixed-version replay. */
+  setReplyProjectionSupported(supported: boolean): void {
+    if (supported === this.replyProjectionSupported && (this.get<boolean>('replyProjectionMode') || false) === supported) return;
+    this.replyProjectionSupported = supported;
+    this.transaction(() => {
+      this.put('replyProjectionMode', supported);
+      for (const { session_id } of this.db.prepare("SELECT session_id FROM cowork_session_ownership WHERE ownership_status='confirmed'").all() as Array<{ session_id: string }>) {
+        this.requireSnapshot(session_id);
+        this.markFilesDirty(session_id);
+      }
+    });
+  }
+  private replyContent(sessionId: string, messageId: string, blockId: string, format: RemoteReplyFormat, text: string): RemoteReplyContentRef {
+    const contentId = createHash('sha256').update(`${messageId}:${blockId}`).digest('hex');
+    const sha256 = createHash('sha256').update(text, 'utf8').digest('hex');
+    const previous = this.db.prepare('SELECT version,sha256 FROM remote_reply_contents WHERE session_id=? AND content_id=? ORDER BY version DESC LIMIT 1').get(sessionId, contentId) as { version: number; sha256: string } | undefined;
+    const versionKey = `replyContentVersion:${sessionId}:${contentId}`;
+    const version = previous?.sha256 === sha256 ? previous.version : Math.max(previous?.version || 0, this.get<number>(versionKey) || 0) + 1;
+    this.put(versionKey, Math.max(version, this.get<number>(versionKey) || 0));
+    if (previous?.sha256 !== sha256) {
+      const chunks = replyChunks(text);
+      for (const chunk of chunks) this.db.prepare('INSERT OR IGNORE INTO remote_reply_chunks VALUES (?,?,?,?)').run(sessionId, chunk.sha256, chunk.text, Number(chunk.sizeBytes));
+      this.db.prepare('INSERT INTO remote_reply_contents VALUES (?,?,?,?,?,?,?,?,?)').run(sessionId, contentId, version, messageId, blockId, format, sha256, stableJson(chunks.map(({ sha256, sizeBytes }) => ({ sha256, sizeBytes }))), Buffer.byteLength(text));
+    }
+    return { contentId, version: String(version), sizeBytes: String(Buffer.byteLength(text)), sha256, format };
+  }
+  /** Resolve only locally persisted references, never caller-provided file paths. */
+  replyContentUploads(sessionId: string, records: ProjectionRecord[]): RemoteReplyUpload[] {
+    const uploads = new Map<string, RemoteReplyUpload>();
+    for (const record of records) for (const block of record.payload.message?.blocks || []) {
+      const ref = block.contentRef as RemoteReplyContentRef | undefined;
+      if (!ref) continue;
+      const row = this.db.prepare('SELECT * FROM remote_reply_contents WHERE session_id=? AND content_id=? AND version=?').get(sessionId, ref.contentId, ref.version) as any;
+      if (!row || row.message_id !== record.payload.message.messageId || row.block_id !== block.blockId || row.sha256 !== ref.sha256 || String(row.size_bytes) !== ref.sizeBytes || row.format !== ref.format) throw new Error('Reply content reference has no matching durable local content');
+      const chunks = (JSON.parse(row.chunks_json) as Array<{ sha256: string; sizeBytes: string }>).map(chunk => {
+        const data = this.db.prepare('SELECT content,size_bytes FROM remote_reply_chunks WHERE session_id=? AND sha256=?').get(sessionId, chunk.sha256) as { content: string; size_bytes: number } | undefined;
+        if (!data || String(data.size_bytes) !== chunk.sizeBytes || createHash('sha256').update(data.content, 'utf8').digest('hex') !== chunk.sha256) throw new Error('Reply content chunk is missing or corrupt');
+        return { ...chunk, text: data.content };
+      });
+      uploads.set(`${ref.contentId}:${ref.version}`, { ...ref, messageId: row.message_id, blockId: row.block_id, chunks });
+    }
+    return [...uploads.values()];
+  }
+  /** Retain exact references held by projections, immutable outbox events and resumable imports. */
+  pruneReplyContents(sessionId: string): void {
+    const refs = new Set<string>();
+    const visit = (value: any): void => {
+      if (!value || typeof value !== 'object') return;
+      if (value.contentRef?.contentId && value.contentRef?.version) refs.add(`${value.contentRef.contentId}:${value.contentRef.version}`);
+      for (const child of Object.values(value)) if (child && typeof child === 'object') visit(child);
+    };
+    for (const row of this.db.prepare('SELECT record_json AS json FROM remote_projection WHERE session_id=? UNION ALL SELECT event_json AS json FROM remote_outbox WHERE session_id=?').all(sessionId, sessionId) as Array<{ json: string }>) visit(JSON.parse(row.json));
+    visit(this.get(`import:${sessionId}`));
+    const chunkRefs = new Set<string>();
+    for (const row of this.db.prepare('SELECT content_id,version,chunks_json FROM remote_reply_contents WHERE session_id=?').all(sessionId) as Array<{ content_id: string; version: number; chunks_json: string }>) {
+      if (refs.has(`${row.content_id}:${row.version}`)) for (const chunk of JSON.parse(row.chunks_json)) chunkRefs.add(chunk.sha256);
+      else this.db.prepare('DELETE FROM remote_reply_contents WHERE session_id=? AND content_id=? AND version=?').run(sessionId, row.content_id, row.version);
+    }
+    for (const row of this.db.prepare('SELECT sha256 FROM remote_reply_chunks WHERE session_id=?').all(sessionId) as Array<{ sha256: string }>) {
+      if (!chunkRefs.has(row.sha256)) this.db.prepare('DELETE FROM remote_reply_chunks WHERE session_id=? AND sha256=?').run(sessionId, row.sha256);
+    }
   }
   setEnabledOwner(owner: RemoteOwner | null): void { this.enabledOwner = owner; }
   setApprovalProjectionSupported(supported: boolean): void { this.approvalProjectionSupported = supported; }
@@ -204,6 +274,7 @@ export class RemoteStore {
   transaction<T>(operation: () => T): T {
     if (this.depth > 0) return operation();
     const beforeChange = this.changeVersion;
+    this.urgentReplyChange = false;
     const result = this.db.transaction(() => {
       this.depth++;
       this.db.prepare('UPDATE remote_write_context SET trusted=1 WHERE id=1').run();
@@ -217,7 +288,7 @@ export class RemoteStore {
         this.depth--;
       }
     })();
-    if (this.changeVersion !== beforeChange) this.wake();
+    if (this.changeVersion !== beforeChange) this.wake(this.urgentReplyChange);
     return result;
   }
   owner(sessionId: string): RemoteOwner | null {
@@ -434,11 +505,15 @@ export class RemoteStore {
     this.db.prepare(`INSERT INTO remote_projection VALUES (?,?,?,?,?) ON CONFLICT(session_id,object_key)
       DO UPDATE SET hash=excluded.hash,revision=excluded.revision,record_json=excluded.record_json`)
       .run(sessionId, key, hash, revision, stableJson(projected));
-    this.enqueue(sessionId, projected);
+    const previousMessage = old ? JSON.parse(old.record_json).payload.message : undefined;
+    const delta = this.replyProjectionSupported && projected.payload.message ? replyAppendDelta(previousMessage, projected.payload.message) : null;
+    this.enqueue(sessionId, delta ? { eventType: RemoteReply.DeltaEvent, payload: delta } : projected);
   }
   private enqueue(sessionId: string, record: ProjectionRecord): void {
     const row = this.sync(sessionId);
     if (!row) return;
+    if (this.replyProjectionSupported && ((record.eventType === 'run.updated' && terminal.has(record.payload.run?.status))
+      || record.eventType === 'approval.updated' || (record.eventType === 'tool.upsert' && (record.payload.tool?.revision === '1' || terminal.has(record.payload.tool?.status))))) this.urgentReplyChange = true;
     const sourceSeq = row.source_seq + 1;
     const event: RemoteEvent = { ...record, eventId: randomUUID(), sourceSeq: String(sourceSeq), occurredAt: iso(Date.now()) };
     this.db.prepare('UPDATE remote_sync SET source_seq=? WHERE local_id=?').run(sourceSeq, sessionId);
@@ -469,8 +544,8 @@ export class RemoteStore {
     const previous = summaryOnly ? this.db.prepare("SELECT record_json FROM remote_projection WHERE session_id=? AND object_key='session'").get(sessionId) as { record_json: string } | undefined : undefined;
     summaryOnly = summaryOnly && Boolean(previous);
     const messages = summaryOnly ? [] : this.db.prepare('SELECT * FROM cowork_messages WHERE session_id=? ORDER BY sequence,created_at,id').all(sessionId) as any[];
-    const visible = messages.filter(publicMessage);
-    const latest = visible.filter(m => ['user', 'assistant'].includes(m.type)).at(-1);
+    const visible = messages.filter(row => this.replyProjectionSupported ? isPublicReplyMessage(row) : publicMessage(row));
+    const latest = visible.filter(m => ['user', 'assistant'].includes(m.type) && publicMessage(m)).at(-1);
     let latestText = latest?.content || '';
     if (latest?.type === 'user') {
       try {
@@ -487,7 +562,10 @@ export class RemoteStore {
     // exact approval closure first, so the server does not invent a competing cancellation.
     // Initial projections still begin with session.upsert and introduce the run normally.
     for (const approval of approvals) if (approval.status !== 'pending' && publishedRunIds.has(approval.runId)) this.projectApproval(sessionId, approval);
-    this.record(sessionId, 'session', { eventType: 'session.upsert', payload: { session: {
+    const deferTerminal = this.replyProjectionSupported && !summaryOnly && run && terminal.has(run.status) && publishedRunIds.has(run.runId);
+    const deferred: Array<{ key: string; record: ProjectionRecord }> = [];
+    const recordState = (key: string, record: ProjectionRecord): void => { if (deferTerminal) deferred.push({ key, record }); else this.record(sessionId, key, record); };
+    recordState('session', { eventType: 'session.upsert', payload: { session: {
       sessionId: this.sync(sessionId)?.session_id, title: shortName(publicText(s.title)), origin: this.get(`origin:${sessionId}`) || 'desktop',
       workspaceId: this.get(`workspace:${sessionId}`), preview: summaryOnly ? JSON.parse(previous!.record_json).payload.session.preview : preview(publicText(latestText)), createdAt: iso(s.created_at), updatedAt: iso(s.updated_at),
       localStatus: s.status, controlVersion: this.controlVersion(sessionId), run,
@@ -496,7 +574,7 @@ export class RemoteStore {
     } } });
     for (const { value: historicalRun } of this.entries<RemoteRun>(`runHistory:${sessionId}:`)) {
       const projectedRun = historicalRun.runId === run?.runId ? run : historicalRun;
-      if (this.get<boolean>(`runPublished:${historicalRun.runId}`) !== false) this.record(sessionId, `run:${historicalRun.runId}`, { eventType: 'run.updated', payload: { run: projectedRun, controlVersion: this.controlVersion(sessionId) } });
+      if (this.get<boolean>(`runPublished:${historicalRun.runId}`) !== false) recordState(`run:${historicalRun.runId}`, { eventType: 'run.updated', payload: { run: projectedRun, controlVersion: this.controlVersion(sessionId) } });
     }
     for (const approval of approvals) this.projectApproval(sessionId, approval);
     // Agent metadata changes reuse the committed preview and never scan/re-upload conversation messages.
@@ -507,7 +585,7 @@ export class RemoteStore {
     const artifacts = this.artifactTracking ? this.db.prepare(`SELECT a.id,a.file_name,a.extension,a.size_bytes,a.availability,r.last_message_id
       FROM library_local_artifacts a JOIN library_artifact_sessions r ON r.artifact_id=a.id
       WHERE r.session_id=? AND r.last_message_id IS NOT NULL ORDER BY a.id`).all(sessionId) as any[] : [];
-    for (const m of visible) {
+    for (const [displayIndex, m] of visible.entries()) {
       let metadata: any = {};
       try { metadata = JSON.parse(m.metadata || '{}'); } catch { /* Legacy malformed metadata is not transmitted. */ }
       if (metadata.remoteRunId && this.get<boolean>(`runPublished:${metadata.remoteRunId}`) === false) continue;
@@ -516,8 +594,14 @@ export class RemoteStore {
       const inputRun = this.get<{ input: { text: string; attachments: Array<{ assetId: string; version: string; fileName: string; mimeType: string; sizeBytes: string; intent: string }> }; inputModel: unknown }>(`inputRun:${metadata.remoteRunId}`);
       const desktopInput = this.get<DesktopInputRun & { inputModel?: unknown }>(`desktopInputRun:${metadata.remoteRunId}`);
       const ownDesktopInput = desktopInput && sameOwner(desktopInput.owner, this.owner(sessionId)) ? desktopInput : null;
-      const content = publicText(m.type === 'user' ? inputRun?.input.text ?? ownDesktopInput?.text ?? m.content : m.content);
-      const blocks: any[] = isTool ? [{ type: 'tool', toolCallId: toolId }] : [{ type: m.type === 'user' ? 'text' : 'markdown', text: content }];
+      const rawContent = m.type === 'user' ? inputRun?.input.text ?? ownDesktopInput?.text ?? m.content : m.content;
+      const content = this.replyProjectionSupported ? redactReplyText(rawContent || '') : publicText(rawContent);
+      const previousTool = tools.get(toolId)?.payload.tool;
+      const storedTool = this.db.prepare('SELECT record_json FROM remote_projection WHERE session_id=? AND object_key=?').get(sessionId, `tool:${toolId}`) as { record_json: string } | undefined;
+      const knownTool = previousTool || (storedTool ? JSON.parse(storedTool.record_json).payload.tool : null);
+      const toolName = shortName(metadata.toolName || knownTool?.name || 'tool');
+      const blocks: any[] = this.replyProjectionSupported ? replyBlocks({ ...m, content }, metadata, isTool ? toolName : undefined)
+        : isTool ? [{ type: 'tool', toolCallId: toolId }] : [{ type: m.type === 'user' ? 'text' : 'markdown', text: content }];
       if (m.type === 'user' && inputRun) {
         for (const asset of inputRun.input.attachments) blocks.push(this.inputProjectionSupported
           ? { type: 'attachment', assetId: asset.assetId, version: asset.version, name: asset.fileName, mimeType: asset.mimeType,
@@ -549,18 +633,39 @@ export class RemoteStore {
         availability: artifact.availability === 'missing' ? 'missing' : 'desktop_only',
       });
       blocks.push(...remoteArtifacts.map(value => value.block));
+      if (this.replyProjectionSupported) for (const [index, block] of blocks.entries()) if (typeof block.text === 'string' && !block.blockId) block.blockId = replyBlockId(m.id, `text:${index}`);
       const message: any = { messageId: m.id, ordinal: String(Math.max(1, m.sequence || 1)), revision: '0',
         runId: metadata.remoteRunId || null, commandId: metadata.remoteCommandId || null,
-        role: isTool ? 'tool' : m.type, status: metadata.isStreaming ? 'streaming' : 'complete', createdAt: iso(m.created_at),
+        role: isTool ? 'tool' : this.replyProjectionSupported && m.type === 'system' ? 'notice' : m.type, status: metadata.isStreaming ? 'streaming' : 'complete', createdAt: iso(m.created_at),
+        ...(this.replyProjectionSupported ? { projectionVersion: RemoteReply.ProjectionVersion, displayOrdinal: String(displayIndex + 1) } : {}),
         contentState: 'complete', preview: isTool ? '' : preview(content), originalContentBytes: String(Buffer.byteLength(stableJson(blocks))), blocks,
         ...(this.inputProjectionSupported && (inputRun || ownDesktopInput?.inputModel) ? { inputModel: inputRun?.inputModel ?? ownDesktopInput?.inputModel ?? null } : {}) };
-      if (Buffer.byteLength(stableJson(message)) > REMOTE_MESSAGE_BYTES - 128) { message.blocks = []; message.contentState = 'desktop_only'; }
+      if (this.replyProjectionSupported) {
+        for (const block of blocks) if (typeof block.text === 'string' && Buffer.byteLength(block.text) > RemoteReply.InlineBytes) {
+          if (Buffer.byteLength(block.text) > RemoteReply.MaximumContentBytes) {
+            // Keep the full source locally. The App receives an explicit overflow notice, never a silent truncation.
+            message.contentState = 'desktop_only';
+            message.contentUnavailableReason = 'CONTENT_LIMIT_EXCEEDED';
+            // originalContentBytes and reason identify the omitted body; do not replace it with a summary.
+          } else {
+            block.contentRef = this.replyContent(sessionId, m.id, block.blockId, block.type === RemoteReplyBlockType.ToolInput ? 'json' : block.type === RemoteReplyBlockType.Markdown ? 'markdown' : 'text', block.text);
+            delete block.text;
+          }
+        }
+      }
+      if (this.replyProjectionSupported) {
+        if (message.contentState === 'desktop_only') message.blocks = [];
+        else message.originalContentBytes = String(Buffer.byteLength(stableJson(blocks)));
+      }
+      if (Buffer.byteLength(stableJson(message)) > REMOTE_MESSAGE_BYTES - 128) { message.blocks = []; message.contentState = 'desktop_only'; if (this.replyProjectionSupported) message.contentUnavailableReason = 'CONTENT_LIMIT_EXCEEDED'; }
       this.record(sessionId, `message:${m.id}`, { eventType: 'message.upsert', payload: { message } });
       liveKeys.add(`message:${m.id}`);
+      let toolStatus = this.replyProjectionSupported ? replyToolState(m.type, metadata) : m.type === 'tool_result' ? (metadata.isError ? 'failed' : 'succeeded') : 'running';
+      if (this.replyProjectionSupported && knownTool && terminal.has(knownTool.status) && !terminal.has(toolStatus)) toolStatus = knownTool.status;
       if (isTool) tools.set(toolId, { eventType: 'tool.upsert', payload: { tool: {
-        toolCallId: toolId, runId: metadata.remoteRunId || run?.runId || null, revision: '0', name: shortName(metadata.toolName || 'tool'),
-        status: m.type === 'tool_result' ? (metadata.isError ? 'failed' : 'succeeded') : 'running',
-        summary: '', startedAt: iso(m.created_at), finishedAt: m.type === 'tool_result' ? iso(m.created_at) : null, error: null,
+        toolCallId: toolId, runId: metadata.remoteRunId || run?.runId || null, revision: '0', name: this.replyProjectionSupported ? toolName : shortName(metadata.toolName || 'tool'),
+        status: toolStatus,
+        summary: '', startedAt: knownTool?.startedAt || iso(m.created_at), finishedAt: ['succeeded', 'failed', 'cancelled'].includes(toolStatus) ? iso(m.created_at) : null, error: null,
       } } });
     }
     for (const [toolId, record] of tools) this.record(sessionId, `tool:${toolId}`, record);
@@ -570,6 +675,16 @@ export class RemoteStore {
       this.enqueue(sessionId, deleted);
       this.db.prepare('UPDATE remote_projection SET hash=?,revision=?,record_json=? WHERE session_id=? AND object_key=?')
         .run(payloadHash(deleted), p.revision + 1, stableJson(deleted), sessionId, p.object_key);
+    }
+    for (const { key, record } of deferred) this.record(sessionId, key, record);
+    if (this.replyProjectionSupported) {
+      const cached = this.db.prepare('SELECT COALESCE(SUM(size_bytes),0) AS bytes FROM remote_reply_chunks WHERE session_id=?').get(sessionId) as { bytes: number };
+      const queued = this.db.prepare('SELECT COUNT(*) AS n FROM remote_outbox WHERE session_id=?').get(sessionId) as { n: number };
+      if (cached.bytes > 64 * 1024 * 1024 && queued.n > 100) {
+        this.requireSnapshot(sessionId);
+        this.db.prepare('DELETE FROM remote_outbox WHERE session_id=?').run(sessionId);
+        this.pruneReplyContents(sessionId);
+      }
     }
   }
   snapshot(sessionId: string): { baseSourceSeq: string; snapshotEpoch: number; records: ProjectionRecord[] } {
@@ -596,6 +711,7 @@ export class RemoteStore {
       this.db.prepare('UPDATE remote_sync SET ack_seq=?,server_seq=?,needs_snapshot=? WHERE local_id=?')
         .run(Number(ack), committedSeq, snapshot && (snapshotEpoch === undefined || snapshotEpoch === (this.get<number>(`snapshotEpoch:${sessionId}`) || 0)) ? 0 : row.needs_snapshot, sessionId);
       this.db.prepare('DELETE FROM remote_outbox WHERE session_id=? AND source_seq<=?').run(sessionId, Number(ack));
+      this.pruneReplyContents(sessionId);
     });
   }
 }

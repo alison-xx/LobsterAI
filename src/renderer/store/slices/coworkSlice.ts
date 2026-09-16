@@ -11,6 +11,7 @@ import {
   type CoworkBtwThread,
 } from '../../../shared/cowork/btw';
 import type { CoworkGoal } from '../../../shared/cowork/goal';
+import { mergeCoworkMediaDetails as mergeMediaDetails, mergeCoworkMessageMetadata } from '../../../shared/cowork/messageMetadata';
 import {
   COWORK_RAIL_TOOLTIP_PREVIEW_MAX_LENGTH,
   type CoworkMessageRailIndexItem,
@@ -356,34 +357,6 @@ const MediaGenerationToolName = {
 const MediaGenerationActionName = {
   Status: 'status',
 } as const;
-
-const readMediaPollCount = (value: unknown): number | undefined => (
-  typeof value === 'number' && Number.isFinite(value) && value > 1
-    ? Math.floor(value)
-    : undefined
-);
-
-const mergeMediaDetails = (
-  existingDetails: Record<string, unknown> | undefined,
-  nextDetails: Record<string, unknown>,
-): Record<string, unknown> => {
-  const existingPollCount = readMediaPollCount(existingDetails?.pollCount);
-  const nextPollCount = readMediaPollCount(nextDetails.pollCount);
-  const pollCount = existingPollCount == null
-    ? nextPollCount
-    : nextPollCount == null
-      ? existingPollCount
-      : Math.max(existingPollCount, nextPollCount);
-  const merged = {
-    ...(existingDetails ?? {}),
-    ...nextDetails,
-  };
-  delete merged.pollCount;
-  if (pollCount != null) {
-    merged.pollCount = pollCount;
-  }
-  return merged;
-};
 
 const getMediaDetailTaskIds = (details: Record<string, unknown>): Set<string> => new Set(
   [details.taskId, details.upstreamTaskId]
@@ -1190,16 +1163,7 @@ const coworkSlice = createSlice({
         if (message) {
           message.content = content;
           if (metadata) {
-            const existingMetadata = message.metadata;
-            const existingToolResultDetails = existingMetadata?.toolResultDetails as Record<string, unknown> | undefined;
-            const nextToolResultDetails = metadata.toolResultDetails as Record<string, unknown> | undefined;
-            message.metadata = {
-              ...existingMetadata,
-              ...metadata,
-              ...(nextToolResultDetails
-                ? { toolResultDetails: mergeMediaDetails(existingToolResultDetails, nextToolResultDetails) }
-                : {}),
-            };
+            message.metadata = mergeCoworkMessageMetadata(message.metadata, metadata);
           }
           upsertRailIndexItem(
             state,

@@ -7,7 +7,8 @@ import type { RemoteStore } from './remoteStore';
 
 export interface LocalRemoteModel {
   identity: string; runtimeRef: string; source: 'subscription' | 'custom'; displayName: string; providerLabel: string;
-  available: boolean; image: boolean; toolCalling: boolean; thinking: RemoteModelItem['thinking'];
+  available: boolean; unavailableReason?: RemoteModelItem['unavailableReason'];
+  image: boolean; toolCalling: boolean; thinking: RemoteModelItem['thinking'];
   /** Never serialized into a public record. Includes credentials/routing to invalidate old selections. */
   configuration: unknown;
 }
@@ -40,7 +41,7 @@ export class RemoteModelCatalog {
       else if (binding.fingerprint !== fingerprint) { binding.version = String(BigInt(binding.version) + 1n); binding.fingerprint = fingerprint; }
       items.push({ modelRef: binding.modelRef, version: binding.version, source: model.source,
         displayName: label(model.displayName, 'Model'), providerLabel: label(model.providerLabel, model.source),
-        available: model.available && model.toolCalling, unavailableReason: model.available && model.toolCalling ? null : RemoteInputReason.ModelUnavailable,
+        available: model.available, unavailableReason: model.available ? null : model.unavailableReason || RemoteInputReason.ModelUnavailable,
         inputCapabilities: { text: true, image: model.image, toolCalling: model.toolCalling },
         thinking: { options: [...model.thinking.options], default: model.thinking.default || null } });
     }

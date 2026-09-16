@@ -9,6 +9,7 @@ export const RemoteInputReason = {
   Stale: 'INPUT_PREPARATION_INVALIDATED', Asset: 'ASSET_NOT_READY', Account: 'ACCESS_DENIED',
   Busy: 'SESSION_BUSY', Version: 'INPUT_VERSION_CONFLICT', Expired: 'COMMAND_EXPIRED',
 } as const;
+export const RemoteModelUnavailableReason = { PermissionDenied: 'PERMISSION_DENIED', Unsupported: 'UNSUPPORTED' } as const;
 export interface RemoteModelItem {
   modelRef: string; version: string; source: 'subscription' | 'custom'; displayName: string; providerLabel: string;
   available: boolean; unavailableReason: string | null;

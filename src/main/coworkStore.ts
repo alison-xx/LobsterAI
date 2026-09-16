@@ -24,6 +24,7 @@ import {
   type CoworkGoal,
   normalizeCoworkGoal,
 } from '../shared/cowork/goal';
+import { mergeCoworkMessageMetadata } from '../shared/cowork/messageMetadata';
 import { OpenClawCronRunMetadataKey } from '../shared/cowork/openclawCronSessionKey';
 import {
   COWORK_RAIL_TOOLTIP_PREVIEW_MAX_LENGTH,
@@ -2421,10 +2422,14 @@ export class CoworkStore {
     }
     if (updates.metadata !== undefined) {
       const original = this.db.prepare('SELECT metadata FROM cowork_messages WHERE id=? AND session_id=?').get(messageId, sessionId) as { metadata?: string } | undefined;
-      let attribution: Record<string, unknown> = {};
-      try { const metadata = JSON.parse(original?.metadata || '{}'); attribution = { remoteRunId: metadata.remoteRunId, remoteCommandId: metadata.remoteCommandId }; } catch { /* Keep malformed legacy attribution unowned. */ }
+      let metadata: Record<string, unknown> = {};
+      try { metadata = JSON.parse(original?.metadata || '{}') || {}; } catch { /* Keep malformed legacy attribution unowned. */ }
+      const merged = mergeCoworkMessageMetadata(metadata, updates.metadata);
+      // Attribution is owned by the local session transaction, never a runtime patch.
+      merged.remoteRunId = metadata.remoteRunId;
+      merged.remoteCommandId = metadata.remoteCommandId;
       setClauses.push('metadata = ?');
-      values.push(JSON.stringify({ ...updates.metadata, ...attribution }));
+      values.push(JSON.stringify(merged));
     }
 
     if (setClauses.length === 0) return;

@@ -18,7 +18,7 @@ export interface RemoteArtifactManifest {
   latest: { artifactVersion: string; assetId: string; assetVersion: string; fileName?: string; mimeType: string; sizeBytes: string; sha256: string } | null;
 }
 export function remoteFileLocalLimit(fileName: string, output: boolean): number | null {
-  const extension = fileName.includes('.') ? fileName.split('.').at(-1)!.toLowerCase() : '';
+  const extension = fileName.includes('.') ? fileName.split('.').pop()!.toLowerCase() : '';
   const groups: Array<[string, number]> = [
     ['md txt csv json yaml yml xml js jsx ts tsx py java c cpp h hpp go rs sh sql css', 5],
     ['png jpg jpeg webp gif', 10], ['pdf docx xlsx pptx', 30],
@@ -28,7 +28,7 @@ export function remoteFileLocalLimit(fileName: string, output: boolean): number 
   return limit ? limit[1] * 1024 * 1024 : null;
 }
 export function remoteFileRule(policy: RemoteFilePolicy, fileName: string, sizeBytes: string, output: boolean): string | null {
-  const extension = fileName.includes('.') ? fileName.split('.').at(-1)!.toLowerCase() : '';
+  const extension = fileName.includes('.') ? fileName.split('.').pop()!.toLowerCase() : '';
   // The server list may tighten local policy; unknown categories/formats stay denied.
   const localLimit = remoteFileLocalLimit(fileName, output);
   const rule = policy.types.find(item => item.extensions.includes(extension) && (output ? item.artifactAutoSync : item.inputAllowed));
