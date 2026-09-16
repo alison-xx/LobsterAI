@@ -56,6 +56,7 @@ export class RemoteFileSync {
   private connection: Connection | null = null;
   private policy: RemoteFilePolicy | null = null;
   private policyAt = 0;
+  private policyRetryAt = 0;
   private cleanupAt = 0;
   private work: Promise<void> | null = null;
   private enabled = false;
@@ -65,7 +66,7 @@ export class RemoteFileSync {
   }
   configure(enabled: boolean): void { this.enabled = enabled; if (!enabled) this.pause(); }
   canCaptureInput(): boolean { return this.enabled && this.deps.enabled() && this.policy?.features.desktopInputSync === true; }
-  pause(): void { this.connection = null; this.policy = null; this.policyAt = 0; }
+  pause(): void { this.connection = null; this.policy = null; this.policyAt = 0; this.policyRetryAt = 0; }
   private prefix(connection: Connection): string {
     return `fileOutput:${createHash('sha256').update(JSON.stringify([connection.environment, connection.owner, connection.deviceId])).digest('hex')}:`;
   }
@@ -77,7 +78,10 @@ export class RemoteFileSync {
   private assert(connection: Connection, sessionId?: string): void { if (!this.current(connection, sessionId)) throw new Error(RemoteFileReason.Access); }
   tick(connection: Connection): void {
     if (!this.enabled) return;
-    if (!this.connection || !sameOwner(this.connection.owner, connection.owner) || this.connection.environment !== connection.environment) { this.policy = null; this.policyAt = 0; }
+    if (!this.connection || !sameOwner(this.connection.owner, connection.owner) || this.connection.environment !== connection.environment
+      || this.connection.deviceId !== connection.deviceId || this.connection.generation !== connection.generation) {
+      this.policy = null; this.policyAt = 0; this.policyRetryAt = 0;
+    }
     this.connection = connection;
     this.deps.store.setFileEnvironment(connection.environment);
     if (this.work) return;
@@ -94,7 +98,7 @@ export class RemoteFileSync {
     this.assert(connection);
     if (!response.ok || envelope.code !== 0) {
       const reason = envelope.data?.reason || RemoteFileReason.Transfer;
-      if (reason === RemoteFileReason.Policy) { this.policy = null; this.policyAt = 0; }
+      if (reason === RemoteFileReason.Policy) { this.policy = null; this.policyAt = 0; this.policyRetryAt = 0; }
       throw new Error(String(reason));
     }
     return envelope.data;
@@ -103,10 +107,12 @@ export class RemoteFileSync {
     return this.request(connection, pathname, { method, headers: { 'Content-Type': 'application/json' }, body: body === undefined ? undefined : JSON.stringify(body) });
   }
   private async cycle(connection: Connection): Promise<void> {
-    if (!this.policy || Date.now() - this.policyAt > 45_000) {
+    if (!this.policy || Date.now() - this.policyAt > 300_000) {
+      if (Date.now() < this.policyRetryAt) return;
+      this.policyRetryAt = Date.now() + 60_000;
       const policy = await this.json(connection, `/file-policy?deviceId=${escapeId(connection.deviceId)}`) as RemoteFilePolicy;
       if (!Array.isArray(policy.types) || !policy.features || !policy.limits || !/^\d+$/u.test(policy.policyVersion)) return;
-      this.policy = policy; this.policyAt = Date.now();
+      this.policy = policy; this.policyAt = Date.now(); this.policyRetryAt = 0;
     }
     if (Date.now() - this.cleanupAt > 3_600_000) { this.cleanupSnapshots(connection); this.cleanupAt = Date.now(); }
     if (this.policy.features.desktopInputSync) await this.inputs(connection);

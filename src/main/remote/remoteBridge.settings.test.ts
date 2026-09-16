@@ -227,7 +227,11 @@ class FakeSocket extends EventTarget {
 describe('truthful remote connection state', () => {
   it('keeps a failed ticket request visible while recovering existing work over HTTPS', async () => {
     const { bridge, request } = fixture();
-    request.mockRejectedValueOnce(new RemoteApiError(47022, 'Online desktop limit reached'));
+    const original = request.getMockImplementation()!;
+    request.mockImplementation(async (owner, pathname, init) => {
+      if (pathname.endsWith('/connection-tickets')) throw new RemoteApiError(47022, 'Online desktop limit reached');
+      return original(owner, pathname, init);
+    });
     await bridge.tick();
     expect(bridge.state()).toMatchObject({ connected: false, connectionReason: RemoteConnectionReason.ServerUnavailable, errorCode: 47022 });
     expect(request.mock.calls.some(([, pathname]) => pathname.includes('/commands?'))).toBe(true);
@@ -334,6 +338,36 @@ describe('truthful remote connection state', () => {
     socket.frame({ type: 'pong' });
     expect(bridge.state().connected).toBe(true);
     expect(changed).toHaveBeenCalledTimes(1);
+  });
+  it('honors thirty-second heartbeats and ninety-second online expiry from hello', async () => {
+    vi.useFakeTimers(); vi.stubGlobal('WebSocket', FakeSocket);
+    const { bridge } = fixture(); await bridge.connect();
+    const socket = FakeSocket.instances.at(-1)!;
+    expect(bridge.state().connectionStatus).toBe(RemoteConnectionStatus.Offline);
+    socket.frame({ type: 'hello', protocolVersion: REMOTE_PROTOCOL_VERSION, connectionGeneration: '1',
+      heartbeatIntervalSeconds: 30, heartbeatTimeoutSeconds: 90 });
+    expect(bridge.state().connectionStatus).toBe(RemoteConnectionStatus.Online);
+    vi.advanceTimersByTime(29999); expect(socket.send).not.toHaveBeenCalled();
+    vi.advanceTimersByTime(1); expect(socket.send).toHaveBeenCalledTimes(1);
+    expect(JSON.parse(socket.send.mock.calls[0][0])).toMatchObject({ type: 'ping', id: expect.any(String) });
+    socket.frame({ type: 'pong' });
+    vi.advanceTimersByTime(89999);
+    expect(socket.send).toHaveBeenCalledTimes(3);
+    expect(bridge.state().connected).toBe(true);
+    vi.advanceTimersByTime(1);
+    expect(bridge.state()).toMatchObject({ connected: false, connectionStatus: RemoteConnectionStatus.Offline, errorCode: 4408 });
+    expect(socket.close).toHaveBeenCalledTimes(1);
+  });
+  it('preserves the legacy heartbeat defaults when hello omits timing fields', async () => {
+    vi.useFakeTimers(); vi.stubGlobal('WebSocket', FakeSocket);
+    const { bridge } = fixture(); await bridge.connect();
+    const socket = FakeSocket.instances.at(-1)!;
+    socket.frame({ type: 'hello', protocolVersion: REMOTE_PROTOCOL_VERSION, connectionGeneration: '1' });
+    vi.advanceTimersByTime(24999); expect(socket.send).not.toHaveBeenCalled();
+    vi.advanceTimersByTime(1); expect(socket.send).toHaveBeenCalledTimes(1);
+    vi.advanceTimersByTime(49999); expect(bridge.state().connected).toBe(true);
+    vi.advanceTimersByTime(1);
+    expect(bridge.state()).toMatchObject({ connected: false, errorCode: 4408 });
   });
   it('rejects malformed hello and ignores late frames from a previous account', async () => {
     vi.stubGlobal('WebSocket', FakeSocket);

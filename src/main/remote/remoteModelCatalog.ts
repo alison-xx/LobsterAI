@@ -24,7 +24,13 @@ const label = (value: string, fallback: string): string => {
 
 /** Persistent opaque identity; deletion never reassigns an old reference to a new model. */
 export class RemoteModelCatalog {
+  private publicationContext = '';
+  private checkedHash = '';
+  private checkedAt = 0;
+  private retryAt = 0;
+  private publicationEpoch = 0;
   constructor(private readonly store: Pick<RemoteStore, 'get' | 'put'>, private readonly models: () => LocalRemoteModel[]) {}
+  resetPublication(): void { this.publicationEpoch++; this.publicationContext = ''; this.checkedHash = ''; this.checkedAt = 0; this.retryAt = 0; }
   private key(owner: RemoteOwner, deviceId: string): string { return `inputModels:${JSON.stringify([owner.userId, owner.scopeKey, deviceId])}`; }
   private state(owner: RemoteOwner, deviceId: string): CatalogState { return this.store.get<CatalogState>(this.key(owner, deviceId)) || { bindings: [], catalogVersion: '0' }; }
   refresh(owner: RemoteOwner, deviceId: string): RemoteModelItem[] {
@@ -69,18 +75,31 @@ export class RemoteModelCatalog {
     api: (path: string, method?: string, body?: unknown) => Promise<any>, current: () => boolean): Promise<void> {
     const items = this.refresh(owner, deviceId);
     if (items.length > 200 || Buffer.byteLength(JSON.stringify(items)) > 256 * 1024) throw new RemoteInputError(RemoteInputReason.Invalid);
+    const context = JSON.stringify([owner, deviceId, generation]);
+    if (this.publicationContext !== context) { this.resetPublication(); this.publicationContext = context; }
+    const epoch = this.publicationEpoch;
+    const digest = payloadHash(items);
+    if (Date.now() < this.retryAt || this.checkedHash === digest && Date.now() - this.checkedAt < 300000) return;
+    // Local configuration is checked frequently; unchanged catalogs only need a slow remote reconciliation.
+    this.retryAt = Date.now() + 60000;
     const remote = await api(`/devices/${deviceId}/models`);
-    if (!current()) throw new RemoteInputError(RemoteInputReason.Account);
+    if (!current() || epoch !== this.publicationEpoch) throw new RemoteInputError(RemoteInputReason.Account);
     const state = this.state(owner, deviceId);
     if (state.pending && (remote.lastPublicationId === state.pending.publicationId || remote.catalogVersion !== state.pending.expectedCatalogVersion)) delete state.pending;
     state.catalogVersion = remote.catalogVersion || '0';
-    if (!state.pending && payloadHash(remote.items || []) === payloadHash(items)) { this.store.put(this.key(owner, deviceId), state); return; }
+    if (!state.pending && payloadHash(remote.items || []) === digest) {
+      this.store.put(this.key(owner, deviceId), state);
+      this.checkedHash = digest; this.checkedAt = Date.now(); this.retryAt = 0;
+      return;
+    }
     state.pending ||= { publicationId: randomUUID(), expectedCatalogVersion: state.catalogVersion, items };
     this.store.put(this.key(owner, deviceId), state);
+    const publishedHash = payloadHash(state.pending.items);
     const result = await api(`/devices/${deviceId}/models/publish`, 'POST', { ...state.pending, connectionGeneration: generation });
-    if (!current()) throw new RemoteInputError(RemoteInputReason.Account);
+    if (!current() || epoch !== this.publicationEpoch) throw new RemoteInputError(RemoteInputReason.Account);
     const latest = this.state(owner, deviceId);
     if (latest.pending?.publicationId !== state.pending.publicationId) return;
     latest.catalogVersion = result.catalogVersion; delete latest.pending; this.store.put(this.key(owner, deviceId), latest);
+    this.checkedHash = publishedHash; this.checkedAt = Date.now(); this.retryAt = 0;
   }
 }

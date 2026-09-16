@@ -1,10 +1,11 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { RemoteInputReason } from '../../shared/remote/input';
 import { type LocalRemoteModel, RemoteModelCatalog } from './remoteModelCatalog';
 import type { RemoteStore } from './remoteStore';
 
 const owner = { userId: 'A', scopeKey: 'personal' };
+afterEach(() => vi.restoreAllMocks());
 function fixture() {
   const values = new Map<string, unknown>();
   const store = { get: <T>(key: string): T | null => values.get(key) as T ?? null,
@@ -16,6 +17,63 @@ function fixture() {
     change: (patch: Partial<LocalRemoteModel>) => { models = [{ ...models[0], ...patch }]; }, remove: () => { models = []; } };
 }
 describe('remote model references', () => {
+  it('caches only the catalog actually published when an old immutable publication is pending', async () => {
+    const { catalog, change } = fixture();
+    let items: any[] = []; let version = '0';
+    const api = vi.fn(async (_path: string, method?: string, body?: any) => {
+      if (method === 'POST') {
+        items = body.items; version = String(Number(version) + 1);
+      }
+      return { catalogVersion: version, items };
+    });
+    api.mockImplementationOnce(async () => ({ catalogVersion: '0', items: [] }));
+    api.mockImplementationOnce(async () => { throw new Error('request not received'); });
+    await expect(catalog.publish(owner, 'pc', '1', api, () => true)).rejects.toThrow('request not received');
+    change({ displayName: 'Changed while pending' });
+    await catalog.publish(owner, 'pc', '2', api, () => true);
+    expect(items[0].displayName).toBe('Chat model');
+    await catalog.publish(owner, 'pc', '2', api, () => true);
+    expect(items[0].displayName).toBe('Changed while pending');
+  });
+  it('does not accept an old response after publication state is reset', async () => {
+    const { catalog } = fixture(); const items = catalog.refresh(owner, 'pc');
+    let finish: (value: { catalogVersion: string; items: typeof items }) => void = () => {};
+    const api = vi.fn(async () => ({ catalogVersion: '1', items }));
+    api.mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }));
+    const pending = catalog.publish(owner, 'pc', '1', api, () => true);
+    catalog.resetPublication();
+    finish({ catalogVersion: '1', items });
+    await expect(pending).rejects.toThrow(RemoteInputReason.Account);
+    await catalog.publish(owner, 'pc', '1', api, () => true);
+    expect(api).toHaveBeenCalledTimes(2);
+  });
+  it('checks unchanged catalogs remotely only every five minutes but publishes local changes promptly', async () => {
+    const { catalog, change } = fixture();
+    let now = 1000000; vi.spyOn(Date, 'now').mockImplementation(() => now);
+    const api = vi.fn(async () => ({ catalogVersion: '1', items: catalog.refresh(owner, 'pc') }));
+    await catalog.publish(owner, 'pc', '1', api, () => true);
+    for (let i = 0; i < 19; i++) { now += 15000; await catalog.publish(owner, 'pc', '1', api, () => true); }
+    expect(api).toHaveBeenCalledTimes(1);
+    now += 15000; await catalog.publish(owner, 'pc', '1', api, () => true);
+    expect(api).toHaveBeenCalledTimes(2);
+    change({ displayName: 'Updated' }); await catalog.publish(owner, 'pc', '1', api, () => true);
+    expect(api).toHaveBeenCalledTimes(3);
+  });
+  it('refreshes on a new connection and backs off failed catalog requests', async () => {
+    const { catalog } = fixture();
+    let now = 1000000; vi.spyOn(Date, 'now').mockImplementation(() => now);
+    const api = vi.fn(async () => ({ catalogVersion: '1', items: catalog.refresh(owner, 'pc') }));
+    api.mockRejectedValueOnce(new Error('offline'));
+    await expect(catalog.publish(owner, 'pc', '1', api, () => true)).rejects.toThrow('offline');
+    for (let i = 0; i < 3; i++) { now += 15000; await catalog.publish(owner, 'pc', '1', api, () => true); }
+    expect(api).toHaveBeenCalledTimes(1);
+    now += 15000; await catalog.publish(owner, 'pc', '1', api, () => true);
+    expect(api).toHaveBeenCalledTimes(2);
+    await catalog.publish(owner, 'pc', '2', api, () => true);
+    expect(api).toHaveBeenCalledTimes(3);
+    catalog.resetPublication(); await catalog.publish(owner, 'pc', '2', api, () => true);
+    expect(api).toHaveBeenCalledTimes(4);
+  });
   it('keeps selectable models usable without asserting tool-calling support', () => {
     const { catalog, change } = fixture();
     change({ toolCalling: false });
