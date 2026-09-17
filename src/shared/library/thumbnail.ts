@@ -36,6 +36,7 @@ export const LibraryThumbnailLimits = {
   RenderTimeoutMs: 12_000,
   CaptureTimeoutMs: 5_000,
   PresentationTimeoutMs: 3_000,
+  PresentationPollIntervalMs: 50,
   MaxRenderAttempts: 2,
 } as const;
 

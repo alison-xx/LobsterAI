@@ -11,6 +11,7 @@ import type {
   ActivitySlotResponse,
 } from '../../shared/activity/constants';
 import type { AppUpdateActiveWorkloads, AppUpdateCheckResult, AppUpdateRuntimeState } from '../../shared/appUpdate/constants';
+import type { MarkdownFileBridge } from '../../shared/artifactPreview/markdownEditing';
 import type { ArtifactFileAccess } from '../../shared/artifactPreview/types';
 import type {
   AsrRealtimeSessionRequest,
@@ -281,6 +282,8 @@ interface CoworkConfig {
   memoryUserMemoriesMaxItems: number;
   skipMissedJobs: boolean;
   openClawHeartbeatEnabled: boolean;
+  openClawSkillReviewEnabled: boolean;
+  openClawMemoryFlushEnabled: boolean;
   embeddingEnabled: boolean;
   embeddingProvider: string;
   embeddingModel: string;
@@ -304,6 +307,8 @@ type CoworkConfigUpdate = Partial<
     | 'memoryUserMemoriesMaxItems'
     | 'skipMissedJobs'
     | 'openClawHeartbeatEnabled'
+    | 'openClawSkillReviewEnabled'
+    | 'openClawMemoryFlushEnabled'
     | 'embeddingEnabled'
     | 'embeddingProvider'
     | 'embeddingModel'
@@ -1288,6 +1293,7 @@ interface IElectronAPI {
     ) => () => void;
     onStreamPermissionState?: (callback: (data: { sessionId: string; state: ApprovalState }) => void) => () => void;
     onStreamPermissionDismiss: (callback: (data: { requestId: string }) => void) => () => void;
+    getPendingQuestions?: () => Promise<CoworkPermissionRequest[]>;
     onStreamComplete: (
       callback: (data: { sessionId: string; claudeSessionId: string | null }) => void,
     ) => () => void;
@@ -1571,6 +1577,7 @@ interface IElectronAPI {
     createRealtimeSession: (options: AsrRealtimeSessionRequest) => Promise<AsrRealtimeSessionResult>;
   };
   artifact: {
+    markdown: MarkdownFileBridge;
     watchFile: (filePath: string) => Promise<void>;
     unwatchFile: (filePath: string) => Promise<void>;
     onFileChanged: (callback: (data: { filePath: string }) => void) => () => void;

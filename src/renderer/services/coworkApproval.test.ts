@@ -1,10 +1,12 @@
 import { afterEach, beforeEach, expect, test, vi } from 'vitest';
 
 import type { ApprovalDecisionOutcome, ApprovalState } from '../../shared/cowork/approval';
+import { OpenClawQuestion } from '../../shared/cowork/openclawQuestion';
 import { store } from '../store';
 import { resetAccountSessionData } from '../store/accountSessionBoundary';
 import { invalidateAuthAccountContext } from '../store/slices/authSlice';
 import { enqueuePendingPermission, updatePendingPermissionState } from '../store/slices/coworkSlice';
+import type { CoworkPermissionRequest } from '../types/cowork';
 import { coworkService } from './cowork';
 
 vi.mock('./i18n', () => ({ i18nService: { t: (key: string) => key } }));
@@ -109,5 +111,79 @@ test('reload hydration cannot reopen an approval resolved while the IPC list was
     requestId: 'approval-1', toolName: 'Bash', toolInput: {}, approval: pending(),
   } }] });
   await vi.waitFor(() => expect(store.getState().cowork.permissionStates['approval-1'].status).toBe('approved'));
+  expect(store.getState().cowork.pendingPermissions).toEqual([]);
+});
+
+const nativeQuestion = (id: string): CoworkPermissionRequest => ({
+  requestId: `${OpenClawQuestion.RequestIdPrefix}${id}`,
+  sessionId: `session-${id}`,
+  toolName: OpenClawQuestion.ToolName,
+  toolInput: {},
+});
+
+const setupNativeQuestionRecovery = (getPendingQuestions: () => Promise<CoworkPermissionRequest[]>) => {
+  const dismissListeners = new Set<(event: { requestId: string }) => void>();
+  const noopListener = () => () => undefined;
+  vi.stubGlobal('window', { electron: { cowork: {
+    onStreamMessage: noopListener, onStreamMessageUpdate: noopListener, onStreamPermission: noopListener,
+    onStreamComplete: noopListener, onStreamError: noopListener, onSessionsChanged: noopListener,
+    onStreamPermissionDismiss: (listener: (event: { requestId: string }) => void) => {
+      dismissListeners.add(listener);
+      return () => { dismissListeners.delete(listener); };
+    },
+    getPendingQuestions,
+  } } });
+  (coworkService as unknown as { setupStreamListeners: () => void }).setupStreamListeners();
+  return {
+    dismiss: (requestId: string) => dismissListeners.forEach(listener => listener({ requestId })),
+    dismissListeners,
+  };
+};
+
+test('account changes recover current native questions and discard the previous account snapshot', async () => {
+  const previous = deferred<CoworkPermissionRequest[]>();
+  const current = deferred<CoworkPermissionRequest[]>();
+  const getPendingQuestions = vi.fn().mockReturnValueOnce(previous.promise).mockReturnValueOnce(current.promise);
+  setupNativeQuestionRecovery(getPendingQuestions);
+
+  store.dispatch(invalidateAuthAccountContext());
+  expect(getPendingQuestions).toHaveBeenCalledTimes(2);
+  current.resolve([nativeQuestion('current')]);
+  await vi.waitFor(() => expect(store.getState().cowork.pendingPermissions).toMatchObject([
+    nativeQuestion('current'),
+  ]));
+
+  previous.resolve([nativeQuestion('previous')]);
+  await previous.promise;
+  await Promise.resolve();
+  expect(store.getState().cowork.pendingPermissions).toMatchObject([nativeQuestion('current')]);
+});
+
+test('native question recovery after an account change still ignores concurrent dismissals', async () => {
+  const current = deferred<CoworkPermissionRequest[]>();
+  const getPendingQuestions = vi.fn().mockResolvedValueOnce([]).mockReturnValueOnce(current.promise);
+  const { dismiss } = setupNativeQuestionRecovery(getPendingQuestions);
+
+  store.dispatch(invalidateAuthAccountContext());
+  const question = nativeQuestion('dismissed');
+  dismiss(question.requestId);
+  current.resolve([question]);
+  await current.promise;
+  await Promise.resolve();
+  expect(store.getState().cowork.pendingPermissions).toEqual([]);
+});
+
+test('destroy cancels native question recovery and removes the account change subscription', async () => {
+  const response = deferred<CoworkPermissionRequest[]>();
+  const getPendingQuestions = vi.fn(() => response.promise);
+  const { dismissListeners } = setupNativeQuestionRecovery(getPendingQuestions);
+
+  coworkService.destroy();
+  store.dispatch(invalidateAuthAccountContext());
+  expect(getPendingQuestions).toHaveBeenCalledTimes(1);
+  expect(dismissListeners.size).toBe(0);
+  response.resolve([nativeQuestion('disposed')]);
+  await response.promise;
+  await Promise.resolve();
   expect(store.getState().cowork.pendingPermissions).toEqual([]);
 });

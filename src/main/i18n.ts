@@ -31,6 +31,13 @@ const translations: Record<LanguageType, Record<string, string>> = {
     remotePermissionRequired: '需要操作确认',
     remoteReviewOnDesktop: '请在电脑端查看并确认此操作。',
     remoteSecureStorageUnavailable: '系统安全存储不可用，暂时无法启用手机远程控制。',
+    xaiAuthMigrationPending: '请等待 AI 引擎完成认证数据升级后，再更改 xAI 登录；若升级失败，请先修复引擎。',
+    xaiAuthStoreFailed: '无法访问 xAI 认证存储，请检查 AI 引擎状态后重试。',
+    openClawStartupMigrationFailed: 'AI 引擎状态升级失败：{error}',
+    openClawPluginVerificationFailed: 'AI 引擎插件校验失败，已停止自动重启。请处理以下插件错误后重试：\n{error}',
+    openClawStartupCompatibilityRepairing: '正在备份并修复旧版网关状态…',
+    openClawDreamingStateRepairing: '正在备份并处理旧版记忆状态…',
+    openClawRuntimeFilesMissing: 'AI 引擎运行文件缺失或无法读取，已停止启动。请退出应用，使用包含修复的最新安装包覆盖安装后重试。',
     // DeepSeek Harness (experimental)
     dshWorkbenchTitle: 'DeepSeek Harness 工作台（实验）',
     dshPlanProviderName: '套餐',
@@ -46,6 +53,7 @@ const translations: Record<LanguageType, Record<string, string>> = {
     // Quit confirmation (native dialog shown on user-initiated quit)
     appQuitConfirmTitle: '退出 LobsterAI？',
     appQuitConfirmDetail: 'LobsterAI 关闭期间，定时任务不会运行，也无法回复 IM 消息。',
+    appQuitConfirmUnsafeMarkdown: '有 Markdown 修改尚未保存，且无法备份草稿。退出后这些修改将丢失。请取消退出，返回文档保存或复制修改。',
     appQuitConfirmQuit: '退出',
     appQuitConfirmCancel: '取消',
     taskCompletionNotificationTitle: '任务已完成',
@@ -415,6 +423,13 @@ const translations: Record<LanguageType, Record<string, string>> = {
     remotePermissionRequired: 'Permission required',
     remoteReviewOnDesktop: 'Review this operation on the desktop.',
     remoteSecureStorageUnavailable: 'Secure system storage is unavailable. Remote control cannot be enabled.',
+    xaiAuthMigrationPending: 'Wait for the AI engine credential migration to finish before changing xAI login. If migration failed, repair the engine first.',
+    xaiAuthStoreFailed: 'Unable to access the xAI credential store. Check the AI engine status and retry.',
+    openClawStartupMigrationFailed: 'AI engine state migration failed: {error}',
+    openClawPluginVerificationFailed: 'AI engine plugin verification failed. Automatic restarts stopped. Fix the plugin error and retry:\n{error}',
+    openClawStartupCompatibilityRepairing: 'Backing up and repairing legacy gateway state…',
+    openClawDreamingStateRepairing: 'Backing up and handling legacy memory state…',
+    openClawRuntimeFilesMissing: 'AI engine runtime files are missing or unreadable. Startup has stopped. Quit the app and reinstall using the latest installer containing the fix, then try again.',
     // DeepSeek Harness (experimental)
     dshWorkbenchTitle: 'DeepSeek Harness Workbench (Experimental)',
     dshPlanProviderName: 'Plan',
@@ -430,6 +445,7 @@ const translations: Record<LanguageType, Record<string, string>> = {
     // Quit confirmation (native dialog shown on user-initiated quit)
     appQuitConfirmTitle: 'Quit LobsterAI?',
     appQuitConfirmDetail: 'While LobsterAI is closed, scheduled tasks will not run and IM messages will not be answered.',
+    appQuitConfirmUnsafeMarkdown: 'Some Markdown changes have not been saved and could not be backed up as drafts. Quitting will lose these changes. Cancel and return to the document to save or copy your changes.',
     appQuitConfirmQuit: 'Quit',
     appQuitConfirmCancel: 'Cancel',
     taskCompletionNotificationTitle: 'Task Complete',

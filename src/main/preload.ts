@@ -12,6 +12,7 @@ import { AppIpcChannel } from '../shared/app/constants';
 import { AppSettingsIpc } from '../shared/appSettings/constants';
 import { AppUpdateIpc } from '../shared/appUpdate/constants';
 import { ArtifactPreviewIpc } from '../shared/artifactPreview/constants';
+import { MarkdownFileIpc, type SaveMarkdownFileRequest } from '../shared/artifactPreview/markdownEditing';
 import type { ArtifactFileAccess } from '../shared/artifactPreview/types';
 import {
   AsrIpcChannel,
@@ -691,6 +692,8 @@ contextBridge.exposeInMainWorld('electron', {
       memoryUserMemoriesMaxItems?: number;
       skipMissedJobs?: boolean;
       openClawHeartbeatEnabled?: boolean;
+      openClawSkillReviewEnabled?: boolean;
+      openClawMemoryFlushEnabled?: boolean;
       embeddingEnabled?: boolean;
       embeddingProvider?: string;
       embeddingModel?: string;
@@ -698,7 +701,7 @@ contextBridge.exposeInMainWorld('electron', {
       embeddingVectorWeight?: number;
       embeddingRemoteBaseUrl?: string;
       embeddingRemoteApiKey?: string;
-    }) => ipcRenderer.invoke('cowork:config:set', config),
+    }) => ipcRenderer.invoke(CoworkIpcChannel.ConfigSet, config),
 
     // Session temp storage (.cowork-temp) maintenance
     getTempStorageUsage: () => ipcRenderer.invoke(CoworkIpcChannel.TempStorageUsage),
@@ -805,10 +808,11 @@ contextBridge.exposeInMainWorld('electron', {
       ipcRenderer.on(CoworkIpcChannel.StreamPermissionState, handler);
       return () => ipcRenderer.removeListener(CoworkIpcChannel.StreamPermissionState, handler);
     },
+    getPendingQuestions: () => ipcRenderer.invoke(CoworkIpcChannel.GetPendingQuestions),
     onStreamPermissionDismiss: (callback: (data: { requestId: string }) => void) => {
       const handler = (_event: any, data: { requestId: string }) => callback(data);
-      ipcRenderer.on('cowork:stream:permissionDismiss', handler);
-      return () => ipcRenderer.removeListener('cowork:stream:permissionDismiss', handler);
+      ipcRenderer.on(CoworkIpcChannel.StreamPermissionDismiss, handler);
+      return () => ipcRenderer.removeListener(CoworkIpcChannel.StreamPermissionDismiss, handler);
     },
     onStreamComplete: (
       callback: (data: { sessionId: string; claudeSessionId: string | null }) => void,
@@ -1052,6 +1056,11 @@ contextBridge.exposeInMainWorld('electron', {
       ipcRenderer.invoke(AsrIpcChannel.CreateRealtimeSession, options),
   },
   artifact: {
+    markdown: {
+      read: (filePath: string) => ipcRenderer.invoke(MarkdownFileIpc.Read, filePath),
+      save: (request: SaveMarkdownFileRequest) => ipcRenderer.invoke(MarkdownFileIpc.Save, request),
+      setHasUnsafeEdits: (hasUnsafeEdits: boolean) => ipcRenderer.send(MarkdownFileIpc.SetUnsafeEdits, hasUnsafeEdits),
+    },
     watchFile: (filePath: string) => ipcRenderer.invoke('artifact:watchFile', filePath),
     unwatchFile: (filePath: string) => ipcRenderer.invoke('artifact:unwatchFile', filePath),
     onFileChanged: (callback: (data: { filePath: string }) => void) => {

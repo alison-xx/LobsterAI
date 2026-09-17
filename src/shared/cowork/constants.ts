@@ -74,7 +74,8 @@ export const CoworkIpcChannel = {
   GetSessionContextUsage: 'cowork:session:contextUsage',
   CompactSessionContext: 'cowork:session:compactContext',
   IsSessionRemoteManaged: 'cowork:session:remoteManaged',
-
+  ConfigSet: 'cowork:config:set',
+  GetPendingQuestions: 'cowork:question:pending',
   CancelMediaTask: 'cowork:media:cancel',
   GetMediaModels: 'media:getModels',
   MediaStatusPollUpdate: 'cowork:media:statusPollUpdate',

@@ -1,7 +1,7 @@
 import { ArrowPathIcon, ChevronDownIcon, ExclamationTriangleIcon, WrenchScrewdriverIcon } from '@heroicons/react/24/outline';
 import React, { useEffect, useState } from 'react';
 
-import { OpenClawEngineErrorCode, OpenClawGatewayRepairErrorCode } from '../../../shared/openclawEngine/constants';
+import { OpenClawEngineErrorCode, OpenClawEnginePhase, OpenClawGatewayRepairErrorCode } from '../../../shared/openclawEngine/constants';
 import { coworkService } from '../../services/cowork';
 import { i18nService } from '../../services/i18n';
 import { LogReporterAction, reportYdAnalyzer } from '../../services/logReporter';
@@ -48,10 +48,10 @@ const EngineFailureOverlay: React.FC<EngineFailureOverlayProps> = ({
   }, []);
 
   useEffect(() => {
-    if (status?.phase === 'running') {
+    if (status?.phase === OpenClawEnginePhase.Running) {
       setGatewayRepairError(null);
     }
-    if (status?.phase !== 'error') {
+    if (status?.phase !== OpenClawEnginePhase.Error) {
       setIsDeferred(false);
     }
   }, [status?.phase]);
@@ -69,8 +69,7 @@ const EngineFailureOverlay: React.FC<EngineFailureOverlayProps> = ({
     }
   };
 
-  // Same repair flow as Settings > Agent Engine > Repair Startup: back up
-  // openclaw.json, regenerate config, restart the gateway.
+  // Same backed-up Doctor and compatibility repair flow as Settings.
   const handleQuickRepairGateway = async () => {
     if (isRepairingGateway || isRestartingGateway) return;
     setIsRepairingGateway(true);
@@ -103,7 +102,7 @@ const EngineFailureOverlay: React.FC<EngineFailureOverlayProps> = ({
     }
   };
 
-  if (suspended || status?.phase !== 'error') {
+  if (suspended || !status || (status.phase !== OpenClawEnginePhase.Error && !isRepairingGateway)) {
     return null;
   }
 
@@ -111,11 +110,16 @@ const EngineFailureOverlay: React.FC<EngineFailureOverlayProps> = ({
   // config cannot help. Quick repair still retries recovery from leftover
   // installer resources, but the honest fix is allowlist + reinstall.
   const isRuntimeMissing = status.errorCode === OpenClawEngineErrorCode.RuntimeEntryMissing;
+  const isRuntimeDamaged = status.errorCode === OpenClawEngineErrorCode.RuntimeFilesMissing;
+  const titleKey = isRepairingGateway ? 'openClawRepairRunning' : isRuntimeDamaged ? 'coworkOpenClawRuntimeDamagedError'
+    : isRuntimeMissing ? 'coworkOpenClawRuntimeMissingError' : 'coworkOpenClawError';
+  const hintKey = isRuntimeDamaged ? 'coworkOpenClawRuntimeDamagedRepairHint'
+    : isRuntimeMissing ? 'coworkOpenClawRuntimeMissingRepairHint' : 'coworkOpenClawErrorRepairHint';
 
   if (isDeferred) {
     return (
       <div className="pointer-events-none fixed inset-x-0 top-4 z-[90] flex justify-center px-4">
-        <div className="pointer-events-auto flex max-w-[calc(100vw-2rem)] items-center gap-1.5 rounded-full border border-red-200 bg-surface py-1 pl-3 pr-1 shadow-lg animate-fade-in-down dark:border-red-900/60">
+        <div className="non-draggable pointer-events-auto flex max-w-[calc(100vw-2rem)] items-center gap-1.5 rounded-full border border-red-200 bg-surface py-1 pl-3 pr-1 shadow-lg animate-fade-in-down dark:border-red-900/60">
           <button
             type="button"
             onClick={() => setIsDeferred(false)}
@@ -125,7 +129,7 @@ const EngineFailureOverlay: React.FC<EngineFailureOverlayProps> = ({
             <span className="truncate">{i18nService.t('coworkOpenClawErrorShort')}</span>
             <ChevronDownIcon className="h-3 w-3 shrink-0 text-secondary" />
           </button>
-          <button
+          {!isRuntimeDamaged && <button
             type="button"
             onClick={handleQuickRepairGateway}
             disabled={isRepairingGateway || isRestartingGateway}
@@ -137,7 +141,7 @@ const EngineFailureOverlay: React.FC<EngineFailureOverlayProps> = ({
             {isRepairingGateway
               ? i18nService.t('openClawRepairRunning')
               : i18nService.t('coworkOpenClawQuickRepair')}
-          </button>
+          </button>}
         </div>
       </div>
     );
@@ -156,23 +160,18 @@ const EngineFailureOverlay: React.FC<EngineFailureOverlayProps> = ({
             <ExclamationTriangleIcon className="h-6 w-6" />
           </span>
           <h3 id="openclaw-gateway-failure-title" className="mt-3 text-base font-semibold text-foreground">
-            {i18nService.t(isRuntimeMissing ? 'coworkOpenClawRuntimeMissingError' : 'coworkOpenClawError')}
+            {i18nService.t(titleKey)}
           </h3>
           <p className="mt-2 text-[13px] leading-5 text-secondary">
-            {i18nService.t(isRuntimeMissing ? 'coworkOpenClawRuntimeMissingRepairHint' : 'coworkOpenClawErrorRepairHint')}
+            {i18nService.t(hintKey)}
           </p>
-          {isRuntimeMissing && status.message && (
-            <p className="mt-2 max-w-full break-all text-xs leading-4 text-secondary/80">
-              {status.message}
-            </p>
-          )}
-          {gatewayRepairError && (
-            <p className="mt-2 text-[13px] leading-5 text-red-600 dark:text-red-400">
-              {gatewayRepairError}
+          {!isRepairingGateway && (gatewayRepairError || status.message) && (
+            <p className="mt-2 max-h-36 max-w-full overflow-y-auto whitespace-pre-wrap break-words text-left text-xs leading-5 text-red-600 dark:text-red-400 [overflow-wrap:anywhere]">
+              {gatewayRepairError || status.message}
             </p>
           )}
         </div>
-        <div className="mt-5 flex flex-col gap-2 sm:flex-row">
+        {!isRuntimeDamaged && <div className="mt-5 flex flex-col gap-2 sm:flex-row">
           <button
             type="button"
             onClick={handleRestartGateway}
@@ -197,7 +196,7 @@ const EngineFailureOverlay: React.FC<EngineFailureOverlayProps> = ({
               ? i18nService.t('openClawRepairRunning')
               : i18nService.t('coworkOpenClawQuickRepair')}
           </button>
-        </div>
+        </div>}
         <div className="mt-4 flex items-center justify-between gap-4">
           {onRequestAppSettings ? (
             <button

@@ -89,6 +89,18 @@ describe('buildAppQuitConfirmationOptions', () => {
     expect(options.buttons?.[options.defaultId ?? -1]).toBe('<appQuitConfirmQuit>');
     expect(options.buttons?.[options.cancelId ?? -1]).toBe('<appQuitConfirmCancel>');
   });
+
+  test('warns that unsafe Markdown edits will be lost and defaults to Cancel', () => {
+    const options = buildAppQuitConfirmationOptions({
+      appName: 'LobsterAI',
+      translate: key => `<${key}>`,
+      hasUnsafeMarkdownEdits: true,
+    });
+
+    expect(options.detail).toBe('<appQuitConfirmUnsafeMarkdown>\n\n<appQuitConfirmDetail>');
+    expect(options.defaultId).toBe(APP_QUIT_CANCEL_BUTTON_INDEX);
+    expect(options.cancelId).toBe(APP_QUIT_CANCEL_BUTTON_INDEX);
+  });
 });
 
 describe('isAppQuitConfirmed', () => {
@@ -125,6 +137,67 @@ describe('showAppQuitConfirmation', () => {
     mocks.showMessageBox.mockResolvedValue({ response: APP_QUIT_CANCEL_BUTTON_INDEX, checkboxChecked: false });
 
     await expect(showAppQuitConfirmation()).resolves.toBe(false);
+  });
+
+  test('requires only one confirmation when the initial prompt warns about unsafe edits', async () => {
+    mocks.showMessageBox.mockResolvedValue({ response: APP_QUIT_CONFIRM_BUTTON_INDEX });
+
+    await expect(showAppQuitConfirmation(() => true)).resolves.toBe(true);
+
+    expect(mocks.showMessageBox).toHaveBeenCalledTimes(1);
+    expect(mocks.showMessageBox.mock.calls[0][0].defaultId).toBe(APP_QUIT_CANCEL_BUTTON_INDEX);
+  });
+
+  test.each([
+    [APP_QUIT_CONFIRM_BUTTON_INDEX, true],
+    [APP_QUIT_CANCEL_BUTTON_INDEX, false],
+  ])('asks again when edits become unsafe during the generic prompt: response %i', async (response, expected) => {
+    const hasUnsafeMarkdownEdits = vi.fn()
+      .mockReturnValueOnce(false)
+      .mockReturnValue(true);
+    mocks.showMessageBox
+      .mockResolvedValueOnce({ response: APP_QUIT_CONFIRM_BUTTON_INDEX })
+      .mockResolvedValueOnce({ response });
+
+    await expect(showAppQuitConfirmation(hasUnsafeMarkdownEdits)).resolves.toBe(expected);
+
+    expect(mocks.showMessageBox).toHaveBeenCalledTimes(2);
+    expect(mocks.showMessageBox.mock.calls[0][0].defaultId).toBe(APP_QUIT_CONFIRM_BUTTON_INDEX);
+    expect(mocks.showMessageBox.mock.calls[1][0].defaultId).toBe(APP_QUIT_CANCEL_BUTTON_INDEX);
+  });
+
+  test('does not ask again after the user cancels the generic prompt', async () => {
+    const hasUnsafeMarkdownEdits = vi.fn()
+      .mockReturnValueOnce(false)
+      .mockReturnValue(true);
+    mocks.showMessageBox.mockResolvedValue({ response: APP_QUIT_CANCEL_BUTTON_INDEX });
+
+    await expect(showAppQuitConfirmation(hasUnsafeMarkdownEdits)).resolves.toBe(false);
+
+    expect(mocks.showMessageBox).toHaveBeenCalledTimes(1);
+  });
+
+  test('does not add a second prompt when a programmatic quit arrives during confirmation', async () => {
+    const hasUnsafeMarkdownEdits = vi.fn()
+      .mockReturnValueOnce(false)
+      .mockReturnValue(true);
+    expect(appQuitConfirmationGate.resolveQuitRequest()).toBe(AppQuitRequestVerdict.Prompt);
+    mocks.showMessageBox.mockImplementation(async () => {
+      appQuitConfirmationGate.armBypass();
+      return { response: APP_QUIT_CONFIRM_BUTTON_INDEX };
+    });
+
+    await expect(showAppQuitConfirmation(hasUnsafeMarkdownEdits)).resolves.toBe(true);
+
+    expect(mocks.showMessageBox).toHaveBeenCalledTimes(1);
+    expect(appQuitConfirmationGate.finishPrompt(false)).toBe(true);
+  });
+
+  test('propagates an unsafe-edit prompt failure instead of confirming the quit', async () => {
+    const error = new Error('dialog unavailable');
+    mocks.showMessageBox.mockRejectedValue(error);
+
+    await expect(showAppQuitConfirmation(() => true)).rejects.toBe(error);
   });
 
   test('still shows the prompt when focusing the app throws', async () => {

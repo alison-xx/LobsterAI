@@ -10,6 +10,7 @@ import {
   AppUpdateStatus,
   isManualDownloadUrl,
 } from '../shared/appUpdate/constants';
+import { OpenClawQuestion } from '../shared/cowork/openclawQuestion';
 import {
   LibraryNavigationEvent,
   LibrarySourceFilter,
@@ -29,12 +30,14 @@ import {
   ConversationSearchShortcutTarget,
   resolveConversationSearchShortcutTarget,
 } from './components/cowork/conversationSearchShortcut';
+import CoworkNativeQuestionModal from './components/cowork/CoworkNativeQuestionModal';
 import CoworkPermissionModal from './components/cowork/CoworkPermissionModal';
 import CoworkQuestionWizard from './components/cowork/CoworkQuestionWizard';
 import EngineFailureOverlay from './components/cowork/EngineFailureOverlay';
 import EngineStartupOverlay from './components/cowork/EngineStartupOverlay';
 import KitsView from './components/kits/KitsView';
 import LibraryView from './components/library/LibraryView';
+import FirstRunLoginIntroduction from './components/login/FirstRunLoginIntroduction';
 import NewUserOnboardingOverlay, {
   NewUserOnboardingStep,
   type NewUserOnboardingStep as NewUserOnboardingStepType,
@@ -284,6 +287,7 @@ const App: React.FC = () => {
   const pendingNewUserWelcomeAfterLoginSawStartupRef = useRef(false);
   const pendingNewUserWelcomeAfterLoginWaitingLoggedRef = useRef(false);
   const pendingNewUserWelcomeAuthCallbackAtRef = useRef(0);
+  const newUserLoginPendingRef = useRef(false);
   const isUserInitiatedUpdateFlowActiveRef = useRef(false);
   const dispatch = useDispatch();
   const defaultSelectedModel = useSelector((state: RootState) => state.model.defaultSelectedModel);
@@ -305,6 +309,7 @@ const App: React.FC = () => {
   );
   const shouldShowNewUserOnboarding =
     privacyAgreed === false
+    && !authUser
     && !isNewUserOnboardingDismissed
     && hasResolvedEngineStartupOverlayState
     && !isEngineStartupOverlayVisible
@@ -1454,7 +1459,9 @@ const App: React.FC = () => {
     finishNewUserOnboarding('next');
   }, [finishNewUserOnboarding, newUserOnboardingStep]);
 
-  const handleNewUserOnboardingStartExperience = useCallback(() => {
+  const handleNewUserOnboardingStartExperience = useCallback(async () => {
+    if (newUserLoginPendingRef.current) return;
+    newUserLoginPendingRef.current = true;
     console.log('[Onboarding] start experience clicked; starting login handoff');
     reportOnboardingAction('guide_start_experience_click', {
       source: 'new_user_onboarding',
@@ -1462,8 +1469,7 @@ const App: React.FC = () => {
     });
     setNewUserWelcomeAfterLoginPending();
     setNewUserWelcomeAfterLoginSignal((value) => value + 1);
-    finishNewUserOnboarding('start_experience');
-    void authService.login()
+    await authService.login()
       .then((result) => {
         if (!result.success) {
           console.warn(
@@ -1483,6 +1489,7 @@ const App: React.FC = () => {
           source: 'new_user_onboarding',
           result: 'success',
         });
+        finishNewUserOnboarding('start_experience');
         setNewUserWelcomeAfterLoginSignal((value) => value + 1);
       })
       .catch((error) => {
@@ -1494,12 +1501,15 @@ const App: React.FC = () => {
         });
         consumeNewUserWelcomeAfterLoginPending();
         showToast(i18nService.t('welcomeLoginFailed'));
+      })
+      .finally(() => {
+        newUserLoginPendingRef.current = false;
       });
   }, [finishNewUserOnboarding, newUserOnboardingStep, showToast]);
 
   const handlePermissionResponse = useCallback(async (result: CoworkPermissionResult) => {
-    if (!pendingPermission) return;
-    await coworkService.respondToPermission(pendingPermission.requestId, result);
+    if (!pendingPermission) return false;
+    return coworkService.respondToPermission(pendingPermission.requestId, result);
   }, [pendingPermission]);
 
   const handleMinimizePermission = useCallback(() => {
@@ -1963,6 +1973,18 @@ const App: React.FC = () => {
   const permissionModal = useMemo(() => {
     if (!pendingPermission) return null;
 
+    if (pendingPermission.toolName === OpenClawQuestion.ToolName) {
+      return (
+        <CoworkNativeQuestionModal
+          key={pendingPermission.requestId}
+          permission={pendingPermission}
+          onRespond={handlePermissionResponse}
+          onMinimize={handleMinimizePermission}
+          hidden={isPendingPermissionMinimized}
+        />
+      );
+    }
+
     // 检查是否为 AskUserQuestion 且有多个问题 -> 使用向导式组件
     const isQuestionTool = pendingPermission.toolName === 'AskUserQuestion';
     if (isQuestionTool && pendingPermission.toolInput) {
@@ -2240,12 +2262,14 @@ const App: React.FC = () => {
           </AppUpdateInteractionOverlay>
         )}
         {shouldShowNewUserOnboarding && (
-          <NewUserOnboardingOverlay
-            step={newUserOnboardingStep}
-            onNext={handleNewUserOnboardingNext}
-            onSkip={handleNewUserOnboardingSkip}
-            onStartExperience={handleNewUserOnboardingStartExperience}
-          />
+          <FirstRunLoginIntroduction onStartExperience={handleNewUserOnboardingStartExperience}>
+            <NewUserOnboardingOverlay
+              step={newUserOnboardingStep}
+              onNext={handleNewUserOnboardingNext}
+              onSkip={handleNewUserOnboardingSkip}
+              onStartExperience={handleNewUserOnboardingStartExperience}
+            />
+          </FirstRunLoginIntroduction>
         )}
       </div>
 

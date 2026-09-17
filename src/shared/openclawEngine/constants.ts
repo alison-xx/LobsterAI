@@ -10,6 +10,10 @@ export const OpenClawEngineIpc = {
 export type OpenClawEngineIpc =
   typeof OpenClawEngineIpc[keyof typeof OpenClawEngineIpc];
 
+export const OpenClawGatewayProcessControl = {
+  Shutdown: 'lobsterai:gateway:shutdown',
+} as const;
+
 export const OpenClawEnginePhase = {
   NotInstalled: 'not_installed',
   Installing: 'installing',
@@ -21,6 +25,15 @@ export const OpenClawEnginePhase = {
 
 export type OpenClawEnginePhase =
   typeof OpenClawEnginePhase[keyof typeof OpenClawEnginePhase];
+
+/** Native Skill Workshop modes exposed by the automatic skill review setting. */
+export const OpenClawSkillReviewMode = {
+  Off: 'off',
+  Auto: 'auto',
+} as const;
+
+export type OpenClawSkillReviewMode =
+  typeof OpenClawSkillReviewMode[keyof typeof OpenClawSkillReviewMode];
 
 export const OpenClawGatewayRepairErrorCode = {
   Busy: 'busy',
@@ -49,6 +62,11 @@ export const OpenClawEngineErrorCode = {
    * from the leftover archive was not possible.
    */
   RuntimeEntryMissing: 'runtime_entry_missing',
+  /** The bundle exists, but required worker implementations are missing or unreadable. */
+  RuntimeFilesMissing: 'runtime_files_missing',
+  /** A targeted startup migration/recovery failed; retain its source during Quick Repair. */
+  StartupCompatibilityFailed: 'startup_compatibility_failed',
+  MemoryDreamingMigrationFailed: 'memory_dreaming_migration_failed',
 } as const;
 
 export type OpenClawEngineErrorCode =

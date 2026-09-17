@@ -55,6 +55,7 @@ import {
   setMessageRailIndex,
   setMessageRailIndexLoading,
   setMessageWindow,
+  setOpenClawRepairing,
   setPermissionSubmissionState,
   setRemoteManaged,
   setSessions,
@@ -95,6 +96,7 @@ import {
   shouldReloadCurrentSessionForChange,
 } from './coworkSessionRefreshPolicy';
 import { i18nService } from './i18n';
+import { restoreNativeQuestionPermissions } from './nativeQuestionRecovery';
 import { reportOnboardingAction } from './onboardingAnalytics';
 
 const STREAM_ERROR_DUPLICATE_WINDOW_MS = 10_000;
@@ -165,6 +167,7 @@ class CoworkService {
   private initialized = false;
   private openClawStatus: OpenClawEngineStatus | null = null;
   private openClawStatusListeners = new Set<(status: OpenClawEngineStatus) => void>();
+  private openClawRepairPromise: Promise<OpenClawGatewayRepairResult> | null = null;
   private openClawEngineListenerAttached = false;
   private latestLoadSessionsRequestId = 0;
   private latestLoadSessionRequestId = 0;
@@ -445,7 +448,17 @@ class CoworkService {
 
     // Restore after renderer reload/account changes. Versioned state rejects a
     // stale list response if a decision finished while this request was in flight.
+    let nativeQuestionCleanup = () => {};
     const hydratePermissions = async (): Promise<void> => {
+      nativeQuestionCleanup();
+      nativeQuestionCleanup = restoreNativeQuestionPermissions({
+        getPendingQuestions: cowork.getPendingQuestions
+          ? () => accountBoundRequest(() => cowork.getPendingQuestions!())
+          : undefined,
+        onStreamPermissionDismiss: (listener) => cowork.onStreamPermissionDismiss(listener),
+      }, (request) => {
+        store.dispatch(enqueuePendingPermission(request));
+      });
       if (!cowork.listPendingPermissions) return;
       try {
         const result = await accountBoundRequest(() => cowork.listPendingPermissions!());
@@ -454,6 +467,7 @@ class CoworkService {
         }
       } catch { /* A switched account or unavailable runtime must not restore old dialogs. */ }
     };
+    this.streamListenerCleanups.push(() => nativeQuestionCleanup());
     void hydratePermissions();
     let permissionAccount = store.getState().auth;
     this.streamListenerCleanups.push(store.subscribe(() => {
@@ -2440,6 +2454,8 @@ class CoworkService {
   }
 
   async repairOpenClawGatewayState(): Promise<OpenClawGatewayRepairResult> {
+    if (this.openClawRepairPromise) return this.openClawRepairPromise;
+
     const engineApi = window.electron?.openclaw?.engine;
     if (!engineApi?.repairGatewayState) {
       return {
@@ -2447,14 +2463,26 @@ class CoworkService {
         error: i18nService.t('openClawRepairApiUnavailable'),
       };
     }
-    const result = await engineApi.repairGatewayState();
-    if (result?.status) {
-      this.notifyOpenClawStatus(result.status);
+    // Own the loading state here so it survives Settings closing and also
+    // covers Quick Repair. Gateway phase changes are not repair completion.
+    const repairPromise = Promise.resolve().then(async () => {
+      const result = await engineApi.repairGatewayState();
+      if (result?.status) {
+        this.notifyOpenClawStatus(result.status);
+      }
+      return result ?? {
+        success: false,
+        error: i18nService.t('openClawRepairFailed'),
+      };
+    });
+    this.openClawRepairPromise = repairPromise;
+    store.dispatch(setOpenClawRepairing(true));
+    try {
+      return await repairPromise;
+    } finally {
+      this.openClawRepairPromise = null;
+      store.dispatch(setOpenClawRepairing(false));
     }
-    return result ?? {
-      success: false,
-      error: i18nService.t('openClawRepairFailed'),
-    };
   }
 
   async generateSessionTitle(prompt: string | null): Promise<string | null> {

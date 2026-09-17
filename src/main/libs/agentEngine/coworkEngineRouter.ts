@@ -9,6 +9,7 @@ import type {
   CoworkBtwSubmitResponse,
 } from '../../../shared/cowork/btw';
 import type { CoworkGoal } from '../../../shared/cowork/goal';
+import { OpenClawQuestion } from '../../../shared/cowork/openclawQuestion';
 import type { CoworkSteerResponse } from '../../../shared/cowork/steer';
 import type {
   CoworkAgentEngine,
@@ -204,7 +205,15 @@ export class CoworkEngineRouter extends EventEmitter implements CoworkRuntime {
     this.requestSession.clear();
   }
 
-  respondToPermission(requestId: string, result: PermissionResult): void {
+  respondToPermission(requestId: string, result: PermissionResult): void | Promise<void> {
+    if (requestId.startsWith(OpenClawQuestion.RequestIdPrefix)) {
+      const sessionId = this.runtime.getPendingQuestions?.()
+        .find((question) => question.requestId === requestId)?.sessionId ?? this.requestSession.get(requestId);
+      if (!sessionId) return;
+      this.assertSessionAccess(sessionId);
+      // Native answers must be acknowledged before the renderer dismisses the question.
+      return this.runtime.respondToPermission(requestId, result);
+    }
     void this.respondToPermissionConfirmed(requestId, result).catch(error => {
       const state = this.runtime.getPermissionState?.(requestId);
       if (state) this.emit('error', state.sessionId, error instanceof Error ? error.message : String(error));
@@ -213,6 +222,10 @@ export class CoworkEngineRouter extends EventEmitter implements CoworkRuntime {
 
   isSessionActive(sessionId: string): boolean {
     return this.runtime.isSessionActive(sessionId);
+  }
+
+  getPendingQuestions() {
+    return this.runtime.getPendingQuestions?.() ?? [];
   }
 
   getActiveSessionIds(): string[] {

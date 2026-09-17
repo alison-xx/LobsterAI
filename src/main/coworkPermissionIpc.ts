@@ -1,4 +1,5 @@
 import type { ApprovalDecisionOutcome } from '../shared/cowork/approval';
+import { OpenClawQuestion } from '../shared/cowork/openclawQuestion';
 import type { CoworkRuntime, PermissionResult } from './libs/agentEngine/types';
 
 export interface CoworkPermissionSubmission {
@@ -36,6 +37,12 @@ export async function submitCoworkPermission(
     }
   };
   assertAccess();
+
+  if (request.requestId.startsWith(OpenClawQuestion.RequestIdPrefix)) {
+    await deps.runtime.respondToPermission(request.requestId, request.result);
+    assertAccess();
+    return { kind: 'question_resolved' };
+  }
 
   if (snapshot || deps.isRuntimeRequest(request.requestId)) {
     if (!snapshot || !deps.runtime.respondToPermissionConfirmed) throw new Error('APPROVAL_UNAVAILABLE');

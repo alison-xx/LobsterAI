@@ -77,6 +77,10 @@ export class AppQuitConfirmationGate {
   isPromptOpen(): boolean {
     return this.promptOpen;
   }
+
+  isBypassArmed(): boolean {
+    return this.bypassArmed;
+  }
 }
 
 export const appQuitConfirmationGate = new AppQuitConfirmationGate();
@@ -84,26 +88,31 @@ export const appQuitConfirmationGate = new AppQuitConfirmationGate();
 export interface AppQuitConfirmationText {
   appName: string;
   translate: (key: string) => string;
+  hasUnsafeMarkdownEdits?: boolean;
 }
 
 /**
- * Native message box options. `buttons[0]` is the default button, which macOS
- * lays out rightmost and Windows leftmost, so this single order renders as
+ * Native message box options. macOS lays `buttons[0]` out rightmost and Windows
+ * leftmost, so this single order renders as
  * "Cancel | Quit" on macOS and "Quit | Cancel" on Windows — both native. The
  * `warning` type is what gives macOS the caution triangle badged with the app
  * icon; `title` only shows on Windows/Linux, where it is the window caption.
+ * Quit is the default unless unsaved Markdown changes have no safe draft.
  */
 export function buildAppQuitConfirmationOptions({
   appName,
   translate,
+  hasUnsafeMarkdownEdits = false,
 }: AppQuitConfirmationText): MessageBoxOptions {
   return {
     type: 'warning',
     title: appName,
     message: translate('appQuitConfirmTitle'),
-    detail: translate('appQuitConfirmDetail'),
+    detail: hasUnsafeMarkdownEdits
+      ? `${translate('appQuitConfirmUnsafeMarkdown')}\n\n${translate('appQuitConfirmDetail')}`
+      : translate('appQuitConfirmDetail'),
     buttons: [translate('appQuitConfirmQuit'), translate('appQuitConfirmCancel')],
-    defaultId: APP_QUIT_CONFIRM_BUTTON_INDEX,
+    defaultId: hasUnsafeMarkdownEdits ? APP_QUIT_CANCEL_BUTTON_INDEX : APP_QUIT_CONFIRM_BUTTON_INDEX,
     cancelId: APP_QUIT_CANCEL_BUTTON_INDEX,
     noLink: true,
   };
@@ -119,7 +128,9 @@ export function isAppQuitConfirmed(response: number): boolean {
  * whether the quit came from Cmd+Q or from the tray with the window hidden.
  * Resolves `true` when the user chose to quit.
  */
-export async function showAppQuitConfirmation(): Promise<boolean> {
+export async function showAppQuitConfirmation(
+  hasUnsafeMarkdownEdits: () => boolean = () => false,
+): Promise<boolean> {
   try {
     // A tray-menu quit can arrive while another app is frontmost; do not let
     // the alert open behind it.
@@ -127,10 +138,26 @@ export async function showAppQuitConfirmation(): Promise<boolean> {
   } catch (error) {
     console.debug('[AppQuit] failed to focus app before quit confirmation:', error);
   }
-  const { response } = await dialog.showMessageBox(
-    buildAppQuitConfirmationOptions({ appName: APP_NAME, translate: t }),
-  );
-  return isAppQuitConfirmed(response);
+  const showPrompt = async (unsafeMarkdownEdits: boolean): Promise<boolean> => {
+    const { response } = await dialog.showMessageBox(
+      buildAppQuitConfirmationOptions({
+        appName: APP_NAME,
+        translate: t,
+        hasUnsafeMarkdownEdits: unsafeMarkdownEdits,
+      }),
+    );
+    return isAppQuitConfirmed(response);
+  };
+  const warnedAboutUnsafeEdits = hasUnsafeMarkdownEdits();
+  const confirmed = await showPrompt(warnedAboutUnsafeEdits);
+  // The standalone dialog still services IPC. An edit can become unsafe while
+  // the first prompt is open, so do not treat its generic warning as consent
+  // to lose that edit.
+  if (confirmed && !warnedAboutUnsafeEdits && hasUnsafeMarkdownEdits()
+    && !appQuitConfirmationGate.isBypassArmed()) {
+    return showPrompt(true);
+  }
+  return confirmed;
 }
 
 /**

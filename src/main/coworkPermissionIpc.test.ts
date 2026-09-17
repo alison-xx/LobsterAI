@@ -1,6 +1,7 @@
 import { expect, test, vi } from 'vitest';
 
 import type { ApprovalState } from '../shared/cowork/approval';
+import { OpenClawQuestion } from '../shared/cowork/openclawQuestion';
 import { submitCoworkPermission } from './coworkPermissionIpc';
 import type { CoworkRuntime } from './libs/agentEngine/types';
 
@@ -79,4 +80,38 @@ test('missing concurrency metadata is not silently replaced with current approva
   await expect(submitCoworkPermission({ requestId: request.requestId, result: request.result }, deps))
     .rejects.toThrow('INVALID_PERMISSION_RESPONSE');
   expect(respond).not.toHaveBeenCalled();
+});
+
+test('native questions await the runtime question resolver without approval metadata', async () => {
+  const { deps, respond } = fixture();
+  deps.runtime.getPermissionState = () => null;
+  const resolveNative = vi.fn(async () => {});
+  deps.runtime.respondToPermission = resolveNative;
+  const question = {
+    requestId: `${OpenClawQuestion.RequestIdPrefix}question-1`,
+    result: { behavior: 'allow' as const, updatedInput: { answers: { choice: ['A'] } } },
+  };
+  await expect(submitCoworkPermission(question, deps)).resolves.toEqual({ kind: 'question_resolved' });
+  expect(resolveNative).toHaveBeenCalledWith(question.requestId, question.result);
+  expect(respond).not.toHaveBeenCalled();
+  expect(deps.resolveQuestion).not.toHaveBeenCalled();
+
+  resolveNative.mockRejectedValueOnce(new Error('offline'));
+  await expect(submitCoworkPermission(question, deps)).rejects.toThrow('offline');
+
+  deps.canAccessSession = () => false;
+  await expect(submitCoworkPermission(question, deps)).rejects.toThrow('APPROVAL_ACCESS_DENIED');
+  expect(resolveNative).toHaveBeenCalledTimes(2);
+});
+
+test('native question completion checks that the account has not changed', async () => {
+  const { deps } = fixture();
+  deps.runtime.getPermissionState = () => null;
+  let accountKey = 'account-a';
+  deps.accountKey = () => accountKey;
+  deps.runtime.respondToPermission = vi.fn(async () => { accountKey = 'account-b'; });
+  await expect(submitCoworkPermission({
+    requestId: `${OpenClawQuestion.RequestIdPrefix}question-1`,
+    result: { behavior: 'deny' },
+  }, deps)).rejects.toThrow('APPROVAL_ACCESS_DENIED');
 });

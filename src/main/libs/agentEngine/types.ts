@@ -181,7 +181,8 @@ export interface CoworkRuntime {
   expirePermissions?(now?: number): void;
   closeSessionPermissions?(sessionId: string, runId: string | null, status?: 'cancelled' | 'expired' | 'superseded'): void;
   stopAllSessions(): void;
-  respondToPermission(requestId: string, result: PermissionResult): void;
+  respondToPermission(requestId: string, result: PermissionResult): void | Promise<void>;
+  getPendingQuestions?(): Array<PermissionRequest & { sessionId: string }>;
   isSessionActive(sessionId: string): boolean;
   getSessionConfirmationMode(sessionId: string): 'modal' | 'text' | null;
   deleteSubagentSession?(parentSessionId: string, runId: string): Promise<boolean>;

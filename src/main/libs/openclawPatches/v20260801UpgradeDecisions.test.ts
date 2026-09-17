@@ -10,14 +10,24 @@ import {
 
 const RETAINED_PATCHES = [
   'openclaw-aborted-tool-loop-breaker.patch',
+  'openclaw-auth-migration-config-commit.patch',
   'openclaw-browser-blocked-hostnames.patch',
   'openclaw-chat-send-cwd-decoupling.patch',
   'openclaw-cli-startup-metadata-windows-timeout.patch',
+  'openclaw-compaction-summary-format.patch',
+  'openclaw-compaction-summary-section-order.patch',
+  'openclaw-cron-preparation-failure-state.patch',
   'openclaw-cron-skip-missed-jobs.patch',
   'openclaw-im-bound-agent-run-cwd.patch',
+  'openclaw-inferred-plugin-install-allowlist.patch',
   'openclaw-lancedb-optional-transformers.patch',
   'openclaw-lobsterai-model-compat-api.patch',
+  'openclaw-lobsterai-startup-recovery.patch',
+  'openclaw-managed-npm-junction-cleanup.patch',
+  'openclaw-memory-sidecar-archive-generations.patch',
+  'openclaw-omit-default-model-from-system-prompt.patch',
   'openclaw-openai-compatible-cache-control.patch',
+  'openclaw-openai-completions-output-budget.patch',
   'openclaw-plugin-archive-windows-timeout.patch',
   'openclaw-project-memory-negative-probe.patch',
   'openclaw-provider-auth-warm-cooperative-exit.patch',
@@ -25,12 +35,17 @@ const RETAINED_PATCHES = [
   'openclaw-run-failure-detail.patch',
   'openclaw-safe-error-metadata.patch',
   'openclaw-session-goal-rpc.patch',
+  'openclaw-session-migration-duplicate-headers.patch',
   'openclaw-shell-snapshot-electron-node-env.patch',
   'openclaw-skip-disabled-web-search-discovery.patch',
   'openclaw-skip-derive-prompt-segments-deadloop.patch',
   'openclaw-subagent-cleanup-finalize-best-effort.patch',
+  'openclaw-transcript-replay-validation.patch',
   'openclaw-view-image-task-cwd.patch',
   'openclaw-windows-file-path-redaction.patch',
+  'openclaw-windows-process-identity.patch',
+  'openclaw-workspace-attestation-quarantine.patch',
+  'zz-openclaw-error-detail-preview.patch',
   'zz-openclaw-task-cwd-system-prompt.patch',
 ] as const;
 
@@ -51,7 +66,7 @@ const RETIRED_PATCHES = [
 ] as const;
 
 describe('OpenClaw v2026.8.1 upgrade decisions', () => {
-  test('ships exactly the reviewed 23-patch set', () => {
+  test('ships exactly the reviewed patch set', () => {
     const patchFiles = fs.readdirSync(getCurrentOpenClawPatchDir())
       .filter((file) => file.endsWith('.patch'))
       .sort();

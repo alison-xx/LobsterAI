@@ -413,6 +413,126 @@ const legacyStrongPatchValidators = {
 };
 
 const v20260801StrongPatchValidators = {
+  'openclaw-transcript-replay-validation.patch': [
+    {
+      file: 'packages/ai/src/transcript-replay-validation.ts',
+      snippets: [
+        'export function sanitizeReplayMessages(',
+        'export function prepareReplayMessages(',
+        'typeof value === "string" && value.trim().length > 0',
+        'preserveLegacyToolResults',
+        'locations.length < 8',
+        '[transcript-replay] Invalid historical fields omitted:',
+      ],
+    },
+    {
+      file: 'packages/ai/src/transcript-transform.ts',
+      snippets: ['prepareReplayMessages(messages).map(', 'if (block.type !== "toolCall")'],
+    },
+    {
+      file: 'packages/ai/src/internal/shared.ts',
+      snippets: ['export * from "../transcript-replay-validation.js";'],
+    },
+    {
+      file: 'src/agents/transport-message-transform.ts',
+      snippets: [
+        'const validated = prepareReplayMessages(messages,',
+        'preserveLegacyToolResults: allowSyntheticToolResults',
+        'const original = validated[index];',
+      ],
+    },
+  ],
+  'openclaw-compaction-summary-format.patch': [
+    {
+      file: 'packages/agent-core/src/harness/compaction/compaction.ts',
+      snippets: [
+        'export type CompactionSummaryPrompt =',
+        'summaryPrompt?: CompactionSummaryPrompt',
+        'const selectedPrompt =',
+        'summaryPrompt?.kind === "turn-prefix" ? 0.5 : 0.8',
+      ],
+      forbiddenSnippets: ['const prompt = previousSummary ? UPDATE_SUMMARIZATION_PROMPT : SUMMARIZATION_PROMPT;'],
+    },
+    {
+      file: 'src/agents/agent-hooks/compaction-safeguard.ts',
+      snippets: ['customInstructions: correctiveInstructions,'],
+      orderedSnippets: [
+        'messages: pruned.droppedMessagesList,',
+        'summaryPrompt: { kind: "custom", instructions: structuredInstructions },',
+        'messages: messagesToSummarize,',
+        'summaryPrompt: { kind: "custom", instructions: structuredInstructions },',
+        'customInstructions: correctiveInstructions,',
+        'summaryPrompt: { kind: "turn-prefix" },',
+      ],
+      forbiddenSnippets: ['TURN_PREFIX_SUMMARIZATION_PROMPT,'],
+    },
+    {
+      file: 'src/agents/compaction.ts',
+      snippets: ['summaryPrompt?: CompactionSummaryPrompt;', 'params.summaryPrompt,'],
+    },
+    {
+      file: 'src/agents/sessions/compaction/compaction.ts',
+      snippets: ['summaryPrompt?: CompactionSummaryPrompt,', '      summaryPrompt,'],
+    },
+    ...[
+      'packages/agent-core/src/index.ts',
+      'src/agents/runtime/index.ts',
+      'src/plugin-sdk/agent-core.ts',
+    ].map((file) => ({ file, snippets: ['CompactionSummaryPrompt,'] })),
+    {
+      file: 'src/agents/compaction.summary-format.test.ts',
+      snippets: [
+        'retains $kind format through chunk updates and stage merge',
+        'retains caller format and previous summary when oversized history needs fallback',
+      ],
+    },
+    {
+      file: 'src/agents/agent-hooks/compaction-safeguard.test.ts',
+      snippets: ['sends one authoritative safeguard summary format (prefix=%s)'],
+    },
+  ],
+  'openclaw-compaction-summary-section-order.patch': [
+    {
+      file: 'src/agents/agent-hooks/compaction-safeguard-quality.ts',
+      snippets: [
+        'const seenSections = new Set<number>()',
+        'if (seenSections.has(nextSectionIndex))',
+        'if (seenSections.size !== REQUIRED_SUMMARY_SECTIONS.length)',
+      ],
+      forbiddenSnippets: ['const nextHeading = REQUIRED_SUMMARY_SECTIONS[sectionIndex + 1]'],
+    },
+    {
+      file: 'src/agents/agent-hooks/compaction-safeguard.test.ts',
+      snippets: ['retains audit facts under suffix pressure for every ordering of complete summary sections'],
+    },
+  ],
+  'openclaw-lobsterai-startup-recovery.patch': [
+    {
+      file: 'src/agents/main-session-recovery/main-session-restart-recovery-marking.ts',
+      snippets: ['const LOBSTERAI_SESSION_PREFIX = "lobsterai:"'],
+      orderedSnippets: [
+        'export async function markStartupOrphanedMainSessionsForRecovery',
+        'entry.abortedLastRun === true',
+        'hasCurrentProcessOwner({',
+        'if (isMainRestartRecoveryAggregateTerminalOnly(entry))',
+        'return { action: "retire_terminal" }',
+        'parseAgentSessionKey(sessionKey)?.rest ?? sessionKey.trim()',
+        'sessionNamespace.startsWith(LOBSTERAI_SESSION_PREFIX)',
+        'sessionNamespace.slice(LOBSTERAI_SESSION_PREFIX.length).trim()',
+        'return undefined',
+        'return { action: "mark" }',
+      ],
+    },
+    {
+      file: 'src/agents/main-session-recovery/main-session-restart-recovery.test.ts',
+      snippets: [
+        'does not revive unmarked $age running session $sessionKey',
+        'preserves explicit recovery of $sessionKey across consecutive gateway restarts',
+        'retires terminal-only managed recovery residue before skipping new orphan marks',
+        'keeps upstream orphan recovery for unrelated namespace %s',
+      ],
+    },
+  ],
   'openclaw-aborted-tool-loop-breaker.patch': [
     {
       file: 'src/agents/embedded-agent-runner/replay-history.ts',
@@ -558,6 +678,30 @@ const v20260801StrongPatchValidators = {
     {
       file: 'packages/ai/src/transports/openai-completions-params.cache-and-compat.test.ts',
       snippets: ['adds Anthropic cache-control markers for opted-in compatible providers'],
+    },
+  ],
+  'openclaw-openai-completions-output-budget.patch': [
+    {
+      file: 'packages/ai/src/transports/openai-completions-params.ts',
+      snippets: ['const MIN_USEFUL_OUTPUT_TOKENS = 16'],
+      orderedSnippets: [
+        'clampedMaxTokens >= effectiveContextTokens',
+        'const remainingBudget = Math.floor(effectiveContextTokens - estimatedInputTokens - 1)',
+        'remainingBudget < MIN_USEFUL_OUTPUT_TOKENS',
+        'Context overflow: insufficient estimated output budget',
+      ],
+      forbiddenSnippets: ['Math.max(1, effectiveContextTokens - estimatedInputTokens - 1)'],
+    },
+    {
+      file: 'packages/ai/src/transports/openai-completions-output-budget.test.ts',
+      snippets: [
+        'preserves the ordinary requested output budget',
+        'uses a strict HTTP endpoint to distinguish an estimate from actual prompt usage',
+      ],
+    },
+    {
+      file: 'src/agents/embedded-agent-runner/run.overflow-context-recovery.test.ts',
+      snippets: ['bounds compaction recovery for an output budget rejection'],
     },
   ],
   'openclaw-plugin-archive-windows-timeout.patch': [
@@ -777,14 +921,48 @@ const v20260801StrongPatchValidators = {
   ],
   'openclaw-windows-file-path-redaction.patch': [
     {
+      file: 'src/agents/embedded-agent-error-observation.ts',
+      snippets: [
+        'return redactToolPayloadTextWithConfig(text, {',
+      ],
+    },
+    {
       file: 'src/logging/redact-patterns.ts',
       snippets: [
-        'const AWS_SECRET_ACCESS_KEY_VALUE_BOUNDARY = String.raw`(^|[^A-Za-z0-9/+=_])(?<!;base64,[A-Za-z0-9+/=]*)(?<![A-Za-z]:)`;',
+        'export const AWS_SECRET_ACCESS_KEY_VALUE_REDACT_PATTERN',
+      ],
+    },
+    {
+      file: 'src/logging/redact-file-path.ts',
+      snippets: [
+        'export function isAwsSecretFilePathMatch',
+        'const FILE_PATH_CONTEXT_LIMIT = 4096',
+        'const hasFilenameContinuation =',
+        'start >= tokenStart',
+      ],
+    },
+    {
+      file: 'src/logging/redact.ts',
+      snippets: [
+        'const bareAwsSecretPatterns = new WeakSet<RegExp>()',
+        'builtIn && raw === AWS_SECRET_ACCESS_KEY_VALUE_REDACT_PATTERN',
+        'builtInPatternStarts.set(patterns, custom.length)',
+        'builtInPatternStarts.set(patterns, 0)',
+        'isAwsSecretFilePathMatch(',
+        'context?.input ?? ""',
+        'match.index + fullMatch.length - selected.value.length',
       ],
     },
     {
       file: 'src/logging/redact.test.ts',
       snippets: ['const windowsPath = "C:/Users/tester/lobsterai/project/chinajoy-ppt/deck.pptx"'],
+    },
+    {
+      file: 'src/logging/redact-file-path.test.ts',
+      snippets: [
+        'keeps custom and registered secret rules authoritative inside paths',
+        'still masks explicitly labeled path-shaped credentials',
+      ],
     },
   ],
   'zz-openclaw-task-cwd-system-prompt.patch': [
@@ -808,6 +986,99 @@ const v20260801StrongPatchValidators = {
     {
       file: 'src/agents/embedded-agent-runner/run/attempt.cwd-split.test.ts',
       snippets: ['expect(promptCall?.runtimeCwd).toBe(taskRepo)'],
+    },
+  ],
+  'openclaw-omit-default-model-from-system-prompt.patch': [
+    {
+      file: 'src/agents/system-prompt.ts',
+      snippets: ['runtimeInfo?.model ?'],
+      forbiddenSnippets: ['default_model='],
+    },
+    {
+      file: 'src/auto-reply/reply/session-reset-prompt.ts',
+      snippets: ['Execute your Session Startup sequence now'],
+      forbiddenSnippets: ['default_model'],
+    },
+    {
+      file: 'src/agents/system-prompt-default-model.test.ts',
+      snippets: [
+        'provider requests stable when another session changes the default model',
+        'expect(payload).toEqual(originalPayload)',
+        'still reports a change to the actual running model',
+      ],
+    },
+  ],
+  'openclaw-managed-npm-junction-cleanup.patch': [
+    {
+      file: 'src/commands/doctor-plugin-registry.ts',
+      snippets: ['removeManagedNpmPackages(stale, removeManagedNpmDependency)'],
+      forbiddenSnippets: ['fs.rmSync(params.packageDir'],
+    },
+    {
+      file: 'src/commands/doctor-plugin-npm-cleanup.ts',
+      snippets: [
+        'fs.lstatSync(target, { throwIfNoEntry: false })',
+        'fs.unlinkSync(target)',
+        'fs.rmdirSync(target)',
+        '".openclaw-npm-cleanup-"',
+        'fs.renameSync(entry.packageDir, stagedDir)',
+        'fs.copyFileSync(backupPath, filePath)',
+        'cleanupQuarantines(quarantines.values())',
+        'Managed npm cleanup rollback failed; recovery files retained at',
+      ],
+      forbiddenSnippets: ['fs.rmSync('],
+    },
+    {
+      file: 'src/commands/doctor-plugin-registry.cleanup.test.ts',
+      snippets: [
+        'removes stale packages without deleting nested junction targets',
+        'restores the $layout batch after a destructive $name write failure',
+        'retains original metadata and reports recovery paths when restoring a snapshot fails',
+        'persists all retirements and reports retained quarantine when payload cleanup fails',
+      ],
+    },
+  ],
+  'openclaw-memory-sidecar-archive-generations.patch': [
+    {
+      file: 'extensions/memory-core/src/migration/doctor-memory-sidecar.ts',
+      snippets: [
+        'archiveRoot = await root(path.dirname(params.source.legacyPath)',
+        'archiveSuffix = generation === 1 ? ".migrated" : `.migrated.${generation}`',
+        'await fs.lstat(`${params.source.legacyPath}${suffix}${archiveSuffix}`)',
+        'await archiveRoot.move(path.basename(sourcePath), path.basename(archivedPath))',
+        'path.basename(entry.archivedPath),',
+        'path.basename(entry.sourcePath),',
+      ],
+      forbiddenSnippets: [
+        'Left migrated Memory Core legacy memory index sidecar in place because',
+      ],
+    },
+    {
+      file: 'extensions/memory-core/doctor-contract-api.test.ts',
+      snippets: [
+        'archives a conflicting sidecar despite an existing archive and converges on retry',
+        'preserves the SQLite journal family across archive and retry',
+        'does not overwrite an archive created after generation selection',
+      ],
+    },
+  ],
+  'openclaw-workspace-attestation-quarantine.patch': [
+    {
+      file: 'src/infra/state-migrations.workspace-setup.ts',
+      snippets: [
+        'isRecoverableWorkspaceAttestation(params.source, snapshot)',
+        'backupCorruptWorkspaceAttestation({',
+        'remainingMessage: "legacy workspace source remains after quarantine cleanup"',
+      ],
+    },
+    {
+      file: 'src/infra/state-migrations.workspace-attestation-recovery.ts',
+      snippets: [
+        'snapshot.size === snapshot.raw.length',
+        'await sourceRoot.create(relativePath, bytes, { mode: 0o600 })',
+        'workspace attestation backup verification failed',
+        'attestation recovery requires existing workspace content',
+      ],
     },
   ],
 };

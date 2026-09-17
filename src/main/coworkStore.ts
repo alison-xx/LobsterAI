@@ -640,6 +640,8 @@ export interface CoworkConfig {
   memoryUserMemoriesMaxItems: number;
   skipMissedJobs: boolean;
   openClawHeartbeatEnabled: boolean;
+  openClawSkillReviewEnabled: boolean;
+  openClawMemoryFlushEnabled: boolean;
   embeddingEnabled: boolean;
   embeddingProvider: string;
   embeddingModel: string;
@@ -665,6 +667,8 @@ CoworkConfig,
   | 'memoryUserMemoriesMaxItems'
   | 'skipMissedJobs'
   | 'openClawHeartbeatEnabled'
+  | 'openClawSkillReviewEnabled'
+  | 'openClawMemoryFlushEnabled'
   | 'embeddingEnabled'
   | 'embeddingProvider'
   | 'embeddingModel'
@@ -2463,6 +2467,8 @@ export class CoworkStore {
       'memoryUserMemoriesMaxItems',
       'skipMissedJobs',
       'openClawHeartbeatEnabled',
+      'openClawSkillReviewEnabled',
+      'openClawMemoryFlushEnabled',
       'embeddingEnabled',
       'embeddingProvider',
       'embeddingModel',
@@ -2501,6 +2507,8 @@ export class CoworkStore {
       ),
       skipMissedJobs: parseBooleanConfig(cfg.get('skipMissedJobs'), true),
       openClawHeartbeatEnabled: parseBooleanConfig(cfg.get('openClawHeartbeatEnabled'), false),
+      openClawSkillReviewEnabled: parseBooleanConfig(cfg.get('openClawSkillReviewEnabled'), false),
+      openClawMemoryFlushEnabled: parseBooleanConfig(cfg.get('openClawMemoryFlushEnabled'), false),
       embeddingEnabled: parseBooleanConfig(cfg.get('embeddingEnabled'), DEFAULT_EMBEDDING_ENABLED),
       embeddingProvider: cfg.get('embeddingProvider') || DEFAULT_EMBEDDING_PROVIDER,
       embeddingModel: cfg.get('embeddingModel') || DEFAULT_EMBEDDING_MODEL,
@@ -2547,6 +2555,12 @@ export class CoworkStore {
     }
     if (config.openClawHeartbeatEnabled !== undefined) {
       this.upsertConfig('openClawHeartbeatEnabled', config.openClawHeartbeatEnabled ? '1' : '0', now);
+    }
+    if (config.openClawSkillReviewEnabled !== undefined) {
+      this.upsertConfig('openClawSkillReviewEnabled', config.openClawSkillReviewEnabled ? '1' : '0', now);
+    }
+    if (config.openClawMemoryFlushEnabled !== undefined) {
+      this.upsertConfig('openClawMemoryFlushEnabled', config.openClawMemoryFlushEnabled ? '1' : '0', now);
     }
     if (config.embeddingEnabled !== undefined) {
       this.upsertConfig('embeddingEnabled', config.embeddingEnabled ? '1' : '0', now);
