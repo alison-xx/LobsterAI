@@ -5,6 +5,7 @@ import {
   CoworkSystemMessageKind,
 } from '../../common/coworkSystemMessages';
 import type { OpenClawSessionPatch } from '../../common/openclawSession';
+import { normalizeAutoModelRoutingConfig } from '../../shared/cowork/autoModelRouting';
 import {
   type CoworkBtwAbortRequest,
   CoworkBtwStatus,
@@ -56,9 +57,11 @@ import {
   setMessageWindow,
   setOpenClawRepairing,
   setRemoteManaged,
+  setSessionAutoResolvedModel,
   setSessions,
   setStreaming,
   settleBtwEntry,
+  updateCurrentSessionMaxMode,
   updateCurrentSessionModelOverride,
   updateMessageContent,
   updateSessionGoal,
@@ -494,6 +497,22 @@ class CoworkService {
     });
     if (sessionModelOverrideCleanup) {
       this.streamListenerCleanups.push(sessionModelOverrideCleanup);
+    }
+
+    // Auto/Max: display-only report of the model a turn resolved to. It never
+    // rewrites the session selection.
+    const sessionModelAutoResolvedCleanup = cowork.onSessionModelAutoResolved?.((data) => {
+      store.dispatch(setSessionAutoResolvedModel({
+        sessionId: data.sessionId,
+        resolved: {
+          modelRef: data.modelRef,
+          reason: data.reason,
+          ...(data.category ? { category: data.category } : {}),
+        },
+      }));
+    });
+    if (sessionModelAutoResolvedCleanup) {
+      this.streamListenerCleanups.push(sessionModelAutoResolvedCleanup);
     }
 
     // Sessions changed listener (new channel sessions discovered by polling,
@@ -1039,6 +1058,7 @@ class CoworkService {
         dreamingFrequency: (cfg.dreamingFrequency as string) ?? '0 3 * * *',
         dreamingModel: (cfg.dreamingModel as string) ?? '',
         dreamingTimezone: (cfg.dreamingTimezone as string) ?? '',
+        autoModelRouting: normalizeAutoModelRoutingConfig(cfg.autoModelRouting),
         openClawSessionPolicy: sessionPolicyResult?.success && sessionPolicyResult.config
           ? sessionPolicyResult.config
           : { keepAlive: '30d' },
@@ -2178,6 +2198,25 @@ class CoworkService {
 
     console.error('Failed to patch session:', result.error);
     return null;
+  }
+
+  async setSessionMaxMode(sessionId: string, enabled: boolean): Promise<boolean> {
+    const setMaxMode = window.electron?.cowork?.setSessionMaxMode;
+    if (!setMaxMode) {
+      console.error('Cowork setSessionMaxMode API not available');
+      return false;
+    }
+    // Reflect the toggle immediately; roll back if the main process rejects it.
+    store.dispatch(updateCurrentSessionMaxMode({ sessionId, maxMode: enabled }));
+    try {
+      const result = await setMaxMode({ sessionId, enabled });
+      if (result.success) return true;
+      console.error('Failed to set Max mode:', result.error);
+    } catch (error) {
+      console.error('Failed to set Max mode:', error);
+    }
+    store.dispatch(updateCurrentSessionMaxMode({ sessionId, maxMode: !enabled }));
+    return false;
   }
 
   async respondToPermission(requestId: string, result: CoworkPermissionResult): Promise<boolean> {

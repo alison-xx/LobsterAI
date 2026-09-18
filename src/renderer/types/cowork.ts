@@ -1,3 +1,4 @@
+import type { CoworkAutoModelRoutingConfig } from '../../shared/cowork/autoModelRouting';
 import type { CoworkBrowserAnnotationMessageBatch } from '../../shared/cowork/browserAnnotations';
 import type {
   CoworkContextUsageFailureReason,
@@ -158,6 +159,8 @@ export interface CoworkSession {
   systemPrompt: string;
   modelOverride: string;
   thinkingLevel?: ModelThinkingLevel | '';
+  /** Max mode: run turns on the configured Max model, overlaid on the selection. */
+  maxMode?: boolean;
   executionMode: CoworkExecutionMode;
   activeSkillIds: string[];
   activeKitIds?: string[];
@@ -205,6 +208,7 @@ export interface CoworkConfig {
   dreamingFrequency: string;
   dreamingModel: string;
   dreamingTimezone: string;
+  autoModelRouting: CoworkAutoModelRoutingConfig;
   openClawSessionPolicy: OpenClawSessionPolicyConfig;
 }
 
@@ -245,6 +249,7 @@ export type CoworkConfigUpdate = Partial<Pick<
   | 'dreamingFrequency'
   | 'dreamingModel'
   | 'dreamingTimezone'
+  | 'autoModelRouting'
 >>;
 
 export interface CoworkApiConfig {
@@ -379,6 +384,8 @@ export interface CoworkStartOptions {
   agentId?: string;
   modelOverride?: string;
   thinkingLevel?: ModelThinkingLevel;
+  /** Start the session in Max mode (home / new-task surface). */
+  maxMode?: boolean;
   imageAttachments?: CoworkImageAttachment[];
   mediaSelection?: { mode: string; modelId?: string; modelName?: string; imageModelId?: string; videoModelId?: string };
   mediaReferences?: import('./mediaGeneration').MediaAttachmentRef[];

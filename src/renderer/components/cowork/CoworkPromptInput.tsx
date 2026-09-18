@@ -9,6 +9,7 @@ import {
 } from '@heroicons/react/24/outline';
 import { ArrowUpIcon, FolderIcon } from '@heroicons/react/24/solid';
 import { AuthSubscriptionStatus } from '@shared/auth/constants';
+import { AutoModelResolveReason, COWORK_AUTO_MODEL_REF, isAutoModelRef } from '@shared/cowork/autoModelRouting';
 import {
   BrowserAnnotationScreenshotStatus,
   type CoworkBrowserAnnotationBatch,
@@ -74,6 +75,7 @@ import {
   clearDraftAttachments,
   clearDraftBrowserAnnotationBatches,
   clearDraftSelectedTextSnippets,
+  clearSessionAutoResolvedModel,
   COWORK_STEER_QUEUE_LIMIT,
   type DraftAttachment,
   PlanConfirmationState,
@@ -137,6 +139,12 @@ import {
   useAgentSelectedModel,
 } from './agentModelSelection';
 import AttachmentCard from './AttachmentCard';
+import {
+  buildAutoRoutingCandidates,
+  resolveAutoMaxImageSupport,
+  resolveAutoModelDisplayName,
+  resolveCoworkAutoMaxAvailability,
+} from './autoModelRoutingSelection';
 import BrowserAnnotationAttachmentBadge from './BrowserAnnotationAttachmentBadge';
 import ChatLoginExperienceModal from './ChatLoginExperienceModal';
 import { getClipboardAttachmentFiles } from './clipboardAttachments';
@@ -459,6 +467,19 @@ interface CoworkPromptInputProps {
   /** When true, hides attachment/skill buttons but keeps the input box visible (disabled) */
   remoteManaged?: boolean;
   showNewUserWelcomeLoginOverlay?: boolean;
+  // --- Home / new-task Auto & Max (opt-in; only CoworkView passes these) ---
+  // Without a session there is nothing to persist Auto/Max on, so CoworkView
+  // keeps the pending choice and applies it to the session it creates. Passing
+  // onHomeSelectAuto opts the home selector into the Auto row; agent config and
+  // scheduled-task selectors never render this component with these props.
+  /** Whether Auto is the pending selection for the next new task. */
+  homeAutoSelected?: boolean;
+  /** Whether Max is the pending selection for the next new task. */
+  homeMaxMode?: boolean;
+  onHomeSelectAuto?: () => void;
+  onHomeToggleMax?: (enabled: boolean) => void;
+  /** Clear the pending Auto selection when a concrete model is picked. */
+  onHomeClearAuto?: () => void;
 }
 
 const EMPTY_ATTACHMENTS: CoworkAttachment[] = [];
@@ -496,6 +517,11 @@ const CoworkPromptInput = React.forwardRef<CoworkPromptInputRef, CoworkPromptInp
       canSteer = false,
       remoteManaged = false,
       showNewUserWelcomeLoginOverlay = false,
+      homeAutoSelected = false,
+      homeMaxMode = false,
+      onHomeSelectAuto,
+      onHomeToggleMax,
+      onHomeClearAuto,
     } = props;
     const dispatch = useDispatch();
     const draftKey = sessionId || '__home__';
@@ -528,6 +554,10 @@ const CoworkPromptInput = React.forwardRef<CoworkPromptInputRef, CoworkPromptInp
     const authOwnerAccountKey = useSelector((state: RootState) => state.auth.ownerAccountKey);
     const authAccountGeneration = useSelector((state: RootState) => state.auth.accountGeneration);
     const asrQuota = useSelector((state: RootState) => state.asrQuota);
+    const autoModelRoutingConfig = useSelector((state: RootState) => state.cowork.config.autoModelRouting);
+    const autoResolvedModel = useSelector((state: RootState) => (
+      sessionId ? state.cowork.autoResolvedModelBySessionId[sessionId] : undefined
+    ));
     const [value, setValue] = useState(draftPrompt);
     const [steerValue, setSteerValue] = useState(steerDraft);
     const [steerInputActive, setSteerInputActive] = useState(false);
@@ -696,7 +726,35 @@ const CoworkPromptInput = React.forwardRef<CoworkPromptInputRef, CoworkPromptInp
       ? currentSession.thinkingLevel
       : currentAgent?.thinkingLevel,
   );
-  const modelSupportsImage = !!effectiveSelectedModel?.supportsImage;
+  // Auto/Max are Cowork-only. Inside a session they read/write the session
+  // record; on the home surface CoworkView owns the pending choice.
+  const sessionModelOverride = sessionId && currentSession?.id === sessionId
+    ? currentSession.modelOverride || ''
+    : '';
+  const homeAutoMaxSurface = !sessionId && Boolean(onHomeSelectAuto);
+  const autoSelected = sessionId ? isAutoModelRef(sessionModelOverride) : homeAutoMaxSurface && homeAutoSelected;
+  const maxModeEnabled = sessionId
+    ? Boolean(currentSession?.id === sessionId && currentSession.maxMode)
+    : homeAutoMaxSurface && homeMaxMode;
+  const autoRoutingCandidates = useMemo(() => buildAutoRoutingCandidates(availableModels), [availableModels]);
+  const { autoAvailable, maxModelRef } = resolveCoworkAutoMaxAvailability(
+    autoRoutingCandidates,
+    autoModelRoutingConfig,
+  );
+  // IM-managed sessions take their turns from the channel, not from runTurn.
+  const autoMaxSurface = !remoteManaged && (Boolean(sessionId) || homeAutoMaxSurface);
+  // Keep a selected option visible even if it stops being offered, so the user
+  // can always see and leave the current mode.
+  const showAutoRoutingOption = autoMaxSurface && (autoAvailable || autoSelected);
+  const maxModeAvailable = autoMaxSurface && Boolean(maxModelRef) && (Boolean(sessionId) || Boolean(onHomeToggleMax));
+  const autoMaxImageSupport = resolveAutoMaxImageSupport({
+    autoSelected,
+    maxModelRef: maxModeEnabled ? maxModelRef : '',
+    candidates: autoRoutingCandidates,
+    config: autoModelRoutingConfig,
+    baseModelRef: effectiveSelectedModel ? toOpenClawModelRef(effectiveSelectedModel) : '',
+  });
+  const modelSupportsImage = autoMaxImageSupport ?? !!effectiveSelectedModel?.supportsImage;
   const hasAccessibleUserModel = useMemo(
     () => availableModels.some(model => !model.isServerModel && model.accessible !== false),
     [availableModels],
@@ -1898,6 +1956,10 @@ const CoworkPromptInput = React.forwardRef<CoworkPromptInputRef, CoworkPromptInp
       preparedBrowserAnnotations.push({ ...batch, annotations: preparedAnnotations });
     }
 
+    if (sessionId) {
+      // Drop the previous turn's hint before the new turn can report its model.
+      dispatch(clearSessionAutoResolvedModel(sessionId));
+    }
     const result = await onSubmit(
       promptPayload.finalPrompt,
       skillPrompt,
@@ -2884,6 +2946,55 @@ const CoworkPromptInput = React.forwardRef<CoworkPromptInputRef, CoworkPromptInp
     return () => window.removeEventListener(ConfigServiceEvent.Updated, syncFromConfig);
   }, []);
 
+  const autoResolvedLabel = autoSelected && autoResolvedModel?.reason === AutoModelResolveReason.Auto
+    ? i18nService.t('coworkModelAutoResolvedFormat')
+      .replace('{model}', resolveAutoModelDisplayName(autoResolvedModel.modelRef, availableModels))
+    : undefined;
+  const maxModelName = maxModelRef ? resolveAutoModelDisplayName(maxModelRef, availableModels) : undefined;
+
+  const handleSelectAutoModel = async () => {
+    if (!sessionId) {
+      onHomeSelectAuto?.();
+      return;
+    }
+    if (isPatchingModel || isPersistingAgentModel || autoSelected) return;
+    const requestId = modelPatchRequestIdRef.current + 1;
+    modelPatchRequestIdRef.current = requestId;
+    const previousModelOverride = sessionModelOverride;
+    setIsPatchingModel(true);
+    logPromptModelSelection('debug', `switching session ${sessionId} to Auto model routing`);
+    dispatch(updateCurrentSessionModelOverride({ sessionId, modelOverride: COWORK_AUTO_MODEL_REF }));
+    try {
+      // The main process stores the sentinel locally and never forwards it to
+      // the gateway; the next turn patches the model it resolves to.
+      const patchedSession = await coworkService.patchSession(sessionId, { model: COWORK_AUTO_MODEL_REF });
+      if (requestId !== modelPatchRequestIdRef.current) return;
+      if (!patchedSession) {
+        throw new Error('Session patch returned no session.');
+      }
+    } catch (error) {
+      if (requestId === modelPatchRequestIdRef.current) {
+        dispatch(updateCurrentSessionModelOverride({ sessionId, modelOverride: previousModelOverride }));
+        console.warn(`[CoworkPromptInput] Auto model switch for session ${sessionId} failed:`, error);
+        window.dispatchEvent(new CustomEvent('app:showToast', {
+          detail: i18nService.t('coworkModelSwitchFailed'),
+        }));
+      }
+    } finally {
+      if (requestId === modelPatchRequestIdRef.current) {
+        setIsPatchingModel(false);
+      }
+    }
+  };
+
+  const handleToggleMaxMode = (enabled: boolean) => {
+    if (sessionId) {
+      void coworkService.setSessionMaxMode(sessionId, enabled);
+      return;
+    }
+    onHomeToggleMax?.(enabled);
+  };
+
   const largeModelSelector = showModelSelector ? (
     <div className="flex flex-col items-start gap-1">
       <ModelSelector
@@ -2894,9 +3005,19 @@ const CoworkPromptInput = React.forwardRef<CoworkPromptInputRef, CoworkPromptInp
         triggerMaxWidthClassName={largeModelTriggerMaxWidthClassName}
         disabled={isPatchingModel || isPersistingAgentModel || modelSelectionRefreshPending}
         thinkingLevel={effectiveThinkingLevel ?? null}
-        value={agentModelIsInvalid && currentSession?.modelOverride
-          ? { id: '__invalid__', name: currentSession.modelOverride.split('/').pop() || currentSession.modelOverride } as Model
-          : effectiveSelectedModel}
+        value={autoSelected
+          ? null
+          : agentModelIsInvalid && currentSession?.modelOverride
+            ? { id: '__invalid__', name: currentSession.modelOverride.split('/').pop() || currentSession.modelOverride } as Model
+            : effectiveSelectedModel}
+        showAutoOption={showAutoRoutingOption}
+        autoSelected={autoSelected}
+        onSelectAuto={() => { void handleSelectAutoModel(); }}
+        autoResolvedLabel={autoResolvedLabel}
+        maxModeAvailable={maxModeAvailable}
+        maxModeEnabled={maxModeEnabled}
+        maxModelName={maxModelName}
+        onToggleMax={handleToggleMaxMode}
         onChange={async (nextModel, meta: ModelSelectorChangeMeta) => {
           if (isPatchingModel || isPersistingAgentModel) return;
           if (!nextModel) return;
@@ -2982,6 +3103,8 @@ const CoworkPromptInput = React.forwardRef<CoworkPromptInputRef, CoworkPromptInp
             }
             return;
           }
+          // Picking a concrete model on the home surface clears a pending Auto.
+          onHomeClearAuto?.();
           logPromptModelSelection(
             'debug',
             `persisting agent ${currentAgentId} model ${modelRef}; selector group is ${meta.group}; server model is ${selectedModel.isServerModel === true}`,

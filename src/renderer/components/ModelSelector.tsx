@@ -1,9 +1,11 @@
 import {
+  BoltIcon,
   CheckIcon,
   ChevronDownIcon,
   ChevronRightIcon,
   ClockIcon,
   LockClosedIcon,
+  SparklesIcon,
   XMarkIcon,
 } from '@heroicons/react/24/outline';
 import {
@@ -56,6 +58,23 @@ interface ModelSelectorProps {
   triggerMaxWidthClassName?: string;
   /** Persisted thinking level for the selected model. Omit to hide the thinking control. */
   thinkingLevel?: ModelThinkingLevelType | null;
+  // --- Cowork Auto / Max modes (opt-in; only the Cowork prompt input passes these) ---
+  /** Show the "Auto" row that routes every turn to a suitable model. */
+  showAutoOption?: boolean;
+  /** Whether Auto is the current selection. */
+  autoSelected?: boolean;
+  /** Called when the user picks the Auto row. */
+  onSelectAuto?: () => void;
+  /** Subtle hint under the selected Auto row, e.g. "This turn: GPT-5". */
+  autoResolvedLabel?: string;
+  /** Show the Max toggle. */
+  maxModeAvailable?: boolean;
+  /** Whether Max mode is currently on. */
+  maxModeEnabled?: boolean;
+  /** Display name of the model Max mode runs on. */
+  maxModelName?: string;
+  /** Called when the user toggles Max mode. */
+  onToggleMax?: (enabled: boolean) => void;
 }
 
 const DROPDOWN_MAX_HEIGHT = 380; // list max-h-72 plus the tab area and current-model footer
@@ -69,6 +88,10 @@ const DROPDOWN_TRIGGER_GAP = 4; // matches mt-1/mb-1 and the +4 offset in portal
 const DROPDOWN_TABS_BLOCK_HEIGHT = 49; // group tabs block: p-2 + p-0.5 + py-1.5 + leading-4 + border-b
 const DROPDOWN_FOOTER_HEIGHT = 33; // current-model footer: py-2 + leading-4 + border-t
 const DROPDOWN_BORDER_HEIGHT = 2;
+const DROPDOWN_AUTO_ROW_HEIGHT = 36; // Auto row: same metrics as a model row
+const DROPDOWN_AUTO_HINT_HEIGHT = 22; // "This turn: <model>" hint under the Auto row
+const DROPDOWN_MAX_ROW_HEIGHT = 53; // Max toggle: two text lines + py-2.5 + border-b
+const AUTO_OPTION_HOVER_MODEL_ID = '__cowork_auto__';
 const HOVER_CARD_WIDTH = 220;
 const HOVER_CARD_VIEWPORT_MARGIN = 8;
 const HOVER_CLOSE_DELAY = 180;
@@ -232,10 +255,12 @@ export function resolveDropdownListMaxHeight(
   availableSpace: number,
   hasGroupTabs: boolean,
   hasCurrentModelFooter: boolean,
+  extraChromeHeight = 0,
 ): number {
   const chromeHeight = DROPDOWN_BORDER_HEIGHT
     + (hasGroupTabs ? DROPDOWN_TABS_BLOCK_HEIGHT : 0)
-    + (hasCurrentModelFooter ? DROPDOWN_FOOTER_HEIGHT : 0);
+    + (hasCurrentModelFooter ? DROPDOWN_FOOTER_HEIGHT : 0)
+    + extraChromeHeight;
   return Math.min(Math.max(availableSpace - chromeHeight, LIST_MIN_HEIGHT), LIST_MAX_HEIGHT);
 }
 
@@ -394,6 +419,14 @@ const ModelSelector: React.FC<ModelSelectorProps> = ({
   alignDropdownToTriggerEnd = false,
   triggerMaxWidthClassName,
   thinkingLevel,
+  showAutoOption = false,
+  autoSelected = false,
+  onSelectAuto,
+  autoResolvedLabel,
+  maxModeAvailable = false,
+  maxModeEnabled = false,
+  maxModelName,
+  onToggleMax,
 }) => {
   const dispatch = useDispatch();
   const [isOpen, setIsOpen] = React.useState(false);
@@ -448,6 +481,11 @@ const ModelSelector: React.FC<ModelSelectorProps> = ({
   };
   const selectedModelGroup = getModelGroup(selectedModel);
   const showCurrentModelFooter = shouldShowGroupTabs && selectedModel !== null && selectedModelGroup !== null;
+  const showMaxToggle = maxModeAvailable || maxModeEnabled;
+  const autoRowSelected = autoSelected && !maxModeEnabled;
+  const autoModeChromeHeight = (showMaxToggle ? DROPDOWN_MAX_ROW_HEIGHT : 0)
+    + (showAutoOption ? DROPDOWN_AUTO_ROW_HEIGHT : 0)
+    + (showAutoOption && autoRowSelected && autoResolvedLabel ? DROPDOWN_AUTO_HINT_HEIGHT : 0);
   const getPreferredGroup = (): ModelSelectorGroup => {
     const selectedGroup = getModelGroup(selectedModel);
     if (selectedGroup && isGroupAvailable(selectedGroup)) return selectedGroup;
@@ -552,8 +590,13 @@ const ModelSelector: React.FC<ModelSelectorProps> = ({
     const availableSpace = (direction === 'up'
       ? rect.top - topBoundary
       : bottomBoundary - rect.bottom) - DROPDOWN_TRIGGER_GAP - DROPDOWN_VIEWPORT_MARGIN;
-    return resolveDropdownListMaxHeight(availableSpace, shouldShowGroupTabs, showCurrentModelFooter);
-  }, [portal, shouldShowGroupTabs, showCurrentModelFooter]);
+    return resolveDropdownListMaxHeight(
+      availableSpace,
+      shouldShowGroupTabs,
+      showCurrentModelFooter,
+      autoModeChromeHeight,
+    );
+  }, [portal, shouldShowGroupTabs, showCurrentModelFooter, autoModeChromeHeight]);
 
   const updatePortalPosition = React.useCallback((direction: 'up' | 'down') => {
     if (!containerRef.current) return;
@@ -1190,6 +1233,98 @@ const ModelSelector: React.FC<ModelSelectorProps> = ({
     );
   };
 
+  const handleSelectAuto = () => {
+    if (disabled) return;
+    onSelectAuto?.();
+    setRestrictedPrompt(null);
+    setIsThinkingMenuOpen(false);
+    setHoveredModel(null);
+    setIsOpen(false);
+  };
+
+  const renderMaxToggle = () => {
+    if (!showMaxToggle) return null;
+    const maxDescription = maxModelName
+      ? i18nService.t('coworkModelMaxDescription').replace('{model}', maxModelName)
+      : i18nService.t('coworkModelMaxUnavailable');
+    return (
+      <button
+        type="button"
+        role="switch"
+        aria-checked={maxModeEnabled}
+        onClick={() => {
+          if (disabled) return;
+          onToggleMax?.(!maxModeEnabled);
+        }}
+        className="flex w-full items-center gap-2.5 border-b border-border/60 px-3 py-2.5 text-left transition-colors hover:bg-surface-raised"
+      >
+        <span className="flex h-5 w-5 shrink-0 items-center justify-center text-amber-500">
+          <BoltIcon className={MODEL_ICON_CLASS_NAME} />
+        </span>
+        <span className="flex min-w-0 flex-1 flex-col">
+          <span className="truncate text-[13px] font-medium leading-5 text-foreground">
+            {i18nService.t('coworkModelMaxName')}
+          </span>
+          <span className="truncate text-[11px] leading-4 text-secondary">{maxDescription}</span>
+        </span>
+        <span
+          className={`relative flex h-5 w-9 shrink-0 items-center rounded-full transition-colors ${
+            maxModeEnabled ? 'bg-primary' : 'bg-border'
+          }`}
+        >
+          <span
+            className={`absolute h-4 w-4 rounded-full bg-white shadow transition-transform ${
+              maxModeEnabled ? 'translate-x-[18px]' : 'translate-x-0.5'
+            }`}
+          />
+        </span>
+      </button>
+    );
+  };
+
+  const renderAutoRow = () => {
+    if (!showAutoOption) return null;
+    const autoName = i18nService.t('coworkModelAutoName');
+    const autoHoverModel: Model = {
+      id: AUTO_OPTION_HOVER_MODEL_ID,
+      name: autoName,
+      description: i18nService.t('coworkModelAutoDescription'),
+    };
+    return (
+      <div className={maxModeEnabled ? 'opacity-50' : ''}>
+        <button
+          type="button"
+          onClick={handleSelectAuto}
+          onMouseEnter={(event) => handleModelHover(autoHoverModel, event.currentTarget)}
+          onMouseLeave={handleModelHoverEnd}
+          onFocus={(event) => handleModelHover(autoHoverModel, event.currentTarget, 0)}
+          onBlur={handleModelHoverEnd}
+          aria-pressed={autoRowSelected}
+          className={`w-full px-3 py-2 text-left dark:text-claude-darkText text-claude-text flex items-center gap-2.5 transition-colors ${
+            autoRowSelected
+              ? 'bg-primary/10 dark:bg-primary/15'
+              : 'dark:hover:bg-claude-darkSurfaceHover hover:bg-claude-surfaceHover'
+          }`}
+        >
+          <span className="flex h-5 w-5 shrink-0 items-center justify-center text-primary">
+            <SparklesIcon className={MODEL_ICON_CLASS_NAME} />
+          </span>
+          <span className={`min-w-0 flex-1 truncate text-[13px] leading-5 ${autoRowSelected ? 'font-medium' : 'font-normal'}`}>
+            {autoName}
+          </span>
+          {autoRowSelected && (
+            <CheckIcon className="h-4 w-4 shrink-0 text-primary" strokeWidth={2.5} />
+          )}
+        </button>
+        {autoRowSelected && autoResolvedLabel && (
+          <div className="truncate px-3 pb-1.5 pl-[42px] text-[11px] leading-4 text-secondary">
+            {autoResolvedLabel}
+          </div>
+        )}
+      </div>
+    );
+  };
+
   const renderRestrictedPrompt = () => {
     if (!restrictedPrompt) return null;
     return (
@@ -1206,14 +1341,19 @@ const ModelSelector: React.FC<ModelSelectorProps> = ({
       style={portal ? portalStyle : undefined}
       className={`${portal ? '' : `absolute ${dropdownPositionClass} ${dropdownAlignmentClass}`} w-[300px] bg-surface rounded-xl popover-enter shadow-popover z-50 border-border border overflow-hidden`}
     >
+      {renderMaxToggle()}
       {shouldShowGroupTabs && renderGroupTabs()}
+      {renderAutoRow()}
       <div
         ref={scrollContainerRef}
         style={{
           maxHeight: listMaxHeight,
           minHeight: stableListMinHeight !== undefined ? Math.min(stableListMinHeight, listMaxHeight) : undefined,
         }}
-        className="model-selector-scroll overflow-y-auto py-1"
+        // Max overlays the selection: the list stays visible but inert until
+        // Max is turned off, which restores the previous selection.
+        aria-disabled={maxModeEnabled || undefined}
+        className={`model-selector-scroll overflow-y-auto py-1 ${maxModeEnabled ? 'pointer-events-none opacity-50' : ''}`}
       >
         {defaultLabel && (
           <button
@@ -1244,13 +1384,27 @@ const ModelSelector: React.FC<ModelSelectorProps> = ({
         onClick={toggleOpen}
         className={`flex min-w-0 items-center overflow-hidden hover:bg-surface-raised text-foreground transition-colors disabled:opacity-70 disabled:cursor-wait ${triggerClassName} ${isOpen ? 'bg-surface-raised' : ''}`}
       >
-        {selectedModel?.isServerModel && (
+        {maxModeEnabled ? (
+          <span className="flex h-[18px] w-[18px] shrink-0 items-center justify-center text-amber-500">
+            <BoltIcon className={MODEL_ICON_CLASS_NAME} />
+          </span>
+        ) : autoSelected ? (
+          <span className="flex h-[18px] w-[18px] shrink-0 items-center justify-center text-primary">
+            <SparklesIcon className={MODEL_ICON_CLASS_NAME} />
+          </span>
+        ) : selectedModel?.isServerModel && (
           <span className="flex h-[18px] w-[18px] shrink-0 items-center justify-center text-secondary">
             {renderProviderIcon(selectedModel)}
           </span>
         )}
-        <span className={`${triggerTextClassName} min-w-0 truncate`}>{selectedModel?.name ?? defaultLabel ?? ''}</span>
-        {isModelAgenticBlocked(selectedModel) && (
+        <span className={`${triggerTextClassName} min-w-0 truncate`}>
+          {maxModeEnabled
+            ? i18nService.t('coworkModelMaxName')
+            : autoSelected
+              ? i18nService.t('coworkModelAutoName')
+              : selectedModel?.name ?? defaultLabel ?? ''}
+        </span>
+        {!maxModeEnabled && !autoSelected && isModelAgenticBlocked(selectedModel) && (
           <ClockIcon
             className="h-3.5 w-3.5 shrink-0 text-amber-600 dark:text-amber-300"
             aria-label={i18nService.t('serverModelAgenticNotReady')}

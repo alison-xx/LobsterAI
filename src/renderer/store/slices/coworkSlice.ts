@@ -1,5 +1,10 @@
 import { createSlice, PayloadAction } from '@reduxjs/toolkit';
 
+import {
+  type AutoModelCategory,
+  type AutoModelResolveReason,
+  DEFAULT_COWORK_AUTO_MODEL_ROUTING_CONFIG,
+} from '../../../shared/cowork/autoModelRouting';
 import type { CoworkBrowserAnnotationBatch } from '../../../shared/cowork/browserAnnotations';
 import {
   COWORK_BTW_EPHEMERAL_THREAD_LIMIT,
@@ -118,6 +123,17 @@ interface CoworkState {
   /** Media generation mode selection per draft key */
   mediaSelection: Record<string, MediaGenerationSelection>;
   pendingMediaStatusUpdates: Record<string, Array<{ toolCallId: string; details: Record<string, unknown> }>>;
+  /**
+   * Concrete model each Auto/Max session ran its latest turn on (ephemeral,
+   * display only). Drives the "This turn: <model>" hint on the Auto row.
+   */
+  autoResolvedModelBySessionId: Record<string, CoworkAutoResolvedModel>;
+}
+
+export interface CoworkAutoResolvedModel {
+  modelRef: string;
+  reason: AutoModelResolveReason;
+  category?: AutoModelCategory;
 }
 
 const initialState: CoworkState = {
@@ -177,6 +193,7 @@ const initialState: CoworkState = {
     dreamingFrequency: '0 3 * * *',
     dreamingModel: '',
     dreamingTimezone: '',
+    autoModelRouting: DEFAULT_COWORK_AUTO_MODEL_ROUTING_CONFIG,
     openClawSessionPolicy: {
       keepAlive: '30d',
     },
@@ -185,6 +202,7 @@ const initialState: CoworkState = {
   mediaModelsOwnerAccountKey: null,
   mediaSelection: {},
   pendingMediaStatusUpdates: {},
+  autoResolvedModelBySessionId: {},
 };
 
 export const COWORK_STEER_QUEUE_LIMIT = 20;
@@ -1286,6 +1304,23 @@ const coworkSlice = createSlice({
       }
     },
 
+    updateCurrentSessionMaxMode(state, action: PayloadAction<{ sessionId: string; maxMode: boolean }>) {
+      const { sessionId, maxMode } = action.payload;
+      if (state.currentSession?.id !== sessionId) return;
+      state.currentSession.maxMode = maxMode;
+    },
+
+    setSessionAutoResolvedModel(
+      state,
+      action: PayloadAction<{ sessionId: string; resolved: CoworkAutoResolvedModel }>,
+    ) {
+      state.autoResolvedModelBySessionId[action.payload.sessionId] = action.payload.resolved;
+    },
+
+    clearSessionAutoResolvedModel(state, action: PayloadAction<string>) {
+      delete state.autoResolvedModelBySessionId[action.payload];
+    },
+
     enqueuePendingPermission(state, action: PayloadAction<CoworkPermissionRequest>) {
       const alreadyQueued = state.pendingPermissions.some(
         (permission) => permission.requestId === action.payload.requestId
@@ -1578,6 +1613,9 @@ export const {
   updateSessionPinned,
   updateSessionTitle,
   updateCurrentSessionModelOverride,
+  updateCurrentSessionMaxMode,
+  setSessionAutoResolvedModel,
+  clearSessionAutoResolvedModel,
   enqueuePendingPermission,
   dequeuePendingPermission,
   clearPendingPermissions,

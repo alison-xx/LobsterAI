@@ -1,4 +1,5 @@
 import { ArrowPathIcon, ExclamationTriangleIcon } from '@heroicons/react/24/outline';
+import { COWORK_AUTO_MODEL_REF } from '@shared/cowork/autoModelRouting';
 import type { CoworkBrowserAnnotationMessageBatch } from '@shared/cowork/browserAnnotations';
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { useDispatch, useSelector } from 'react-redux';
@@ -120,6 +121,10 @@ const CoworkView: React.FC<CoworkViewProps> = ({
   // Shown when a session start is blocked because no usable model config exists;
   // guides the user to plan models instead of pushing them into custom-model settings.
   const [modelAccessPrompt, setModelAccessPrompt] = useState<ModelAccessPromptKind | null>(null);
+  // Pending Auto / Max choice for tasks started from the home surface. Applied
+  // only to the sessions it creates; never written to the agent's default model.
+  const [homeAutoSelected, setHomeAutoSelected] = useState(false);
+  const [homeMaxMode, setHomeMaxMode] = useState(false);
   // Track if we're starting/continuing a session to prevent duplicate submissions
   const isStartingRef = useRef(false);
   const isContinuingRef = useRef(false);
@@ -409,6 +414,10 @@ const CoworkView: React.FC<CoworkViewProps> = ({
       }
       const imageAttachmentPreviews = buildCoworkImageAttachmentPreviews(imageAttachments);
 
+      // Auto maps to the sentinel the main process resolves per turn; Max is
+      // stored on the new session before its first turn runs.
+      const startModelOverride = homeAutoSelected ? COWORK_AUTO_MODEL_REF : currentAgentSelectedModelRef;
+
       const tempSession: CoworkSession = {
         id: tempSessionId,
         title: fallbackTitle,
@@ -420,8 +429,9 @@ const CoworkView: React.FC<CoworkViewProps> = ({
         updatedAt: now,
         cwd: currentAgentWorkingDirectory,
         systemPrompt: '',
-        modelOverride: currentAgentSelectedModelRef,
+        modelOverride: startModelOverride,
         thinkingLevel: currentAgentThinkingLevel ?? '',
+        maxMode: homeMaxMode,
         executionMode: config.executionMode || 'local',
         activeSkillIds: effectiveRuntimeSkillIds,
         activeKitIds: displayKitIds.length > 0 ? displayKitIds : undefined,
@@ -480,9 +490,9 @@ const CoworkView: React.FC<CoworkViewProps> = ({
       const combinedSystemPrompt = buildCoworkSystemPrompt(skillPrompt, config.systemPrompt);
 
       // Start the actual session immediately with fallback title
-      const sessionModelOverride = currentAgentSelectedModelRef;
+      const sessionModelOverride = startModelOverride;
       logCoworkViewModel(
-        `creating session with model ${sessionModelOverride || 'default'}; agent model is ${currentAgent?.model || 'empty'}; server quota model is ${homeModelUsesServerQuota}`,
+        `creating session with model ${sessionModelOverride || 'default'}${homeMaxMode ? ' (Max mode)' : ''}; agent model is ${currentAgent?.model || 'empty'}; server quota model is ${homeModelUsesServerQuota}`,
       );
       const { session: startedSession, error: startError } = await coworkService.startSession({
         prompt,
@@ -497,6 +507,7 @@ const CoworkView: React.FC<CoworkViewProps> = ({
         agentId: currentAgentId,
         modelOverride: sessionModelOverride,
         thinkingLevel: currentAgentThinkingLevel,
+        ...(homeMaxMode ? { maxMode: true } : {}),
         imageAttachments,
         mediaSelection: mediaSelection && mediaSelection.mode !== 'none' ? mediaSelection : undefined,
         mediaReferences,
@@ -981,6 +992,11 @@ const CoworkView: React.FC<CoworkViewProps> = ({
                   onManageSkills={() => onShowSkills?.()}
                   onManageKits={() => onShowKits?.()}
                   onGoalCommand={handleStartGoalSession}
+                  homeAutoSelected={homeAutoSelected}
+                  homeMaxMode={homeMaxMode}
+                  onHomeSelectAuto={() => setHomeAutoSelected(true)}
+                  onHomeToggleMax={setHomeMaxMode}
+                  onHomeClearAuto={() => setHomeAutoSelected(false)}
                 />
                 <EnterpriseQuotaPrompt
                   reason={blockingHomeQuotaReason}

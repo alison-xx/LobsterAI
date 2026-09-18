@@ -9,6 +9,11 @@ import {
   defaultBrowserWebAccessConfig,
   normalizeBrowserWebAccessConfig,
 } from '../../shared/browserWebAccess/constants';
+import {
+  type CoworkAutoModelRoutingConfig,
+  isSameAutoModelRoutingConfig,
+  normalizeAutoModelRoutingConfig,
+} from '../../shared/cowork/autoModelRouting';
 import { DataMigrationRestoreStatus } from '../../shared/dataMigration/constants';
 import {
   normalizeNotificationSettings,
@@ -72,6 +77,7 @@ import PlugIcon from './icons/PlugIcon';
 import PlusCircleIcon from './icons/PlusCircleIcon';
 import IMSettings from './im/IMSettings';
 import PluginsSettings, { type PluginPendingChanges, type PluginsSettingsHandle } from './plugins/PluginsSettings';
+import AutoModelRoutingSettings from './settings/AutoModelRoutingSettings';
 import BrowserWebAccessSettings from './settings/BrowserWebAccessSettings';
 import {
   buildOpenAICompatibleChatCompletionsUrl,
@@ -1763,6 +1769,9 @@ const Settings: React.FC<SettingsProps> = ({
   const [dreamingFrequency, setDreamingFrequency] = useState<string>(coworkConfig.dreamingFrequency ?? '0 3 * * *');
   const [dreamingModel, setDreamingModel] = useState<string>(coworkConfig.dreamingModel ?? '');
   const [dreamingTimezone, setDreamingTimezone] = useState<string>(coworkConfig.dreamingTimezone ?? '');
+  const [autoModelRouting, setAutoModelRouting] = useState<CoworkAutoModelRoutingConfig>(
+    () => normalizeAutoModelRoutingConfig(coworkConfig.autoModelRouting),
+  );
   const [memoryTab, setMemoryTab] = useState<'entries' | 'embedding'>('entries');
   const [openClawSessionKeepAlive, setOpenClawSessionKeepAlive] = useState<OpenClawSessionKeepAlive>(
     coworkConfig.openClawSessionPolicy?.keepAlive || OpenClawSessionKeepAliveValues.ThirtyDays,
@@ -1807,6 +1816,7 @@ const Settings: React.FC<SettingsProps> = ({
     setDreamingFrequency(coworkConfig.dreamingFrequency ?? '0 3 * * *');
     setDreamingModel(coworkConfig.dreamingModel ?? '');
     setDreamingTimezone(coworkConfig.dreamingTimezone ?? '');
+    setAutoModelRouting(normalizeAutoModelRoutingConfig(coworkConfig.autoModelRouting));
     setOpenClawSessionKeepAlive(coworkConfig.openClawSessionPolicy?.keepAlive || OpenClawSessionKeepAliveValues.ThirtyDays);
   }, [
     coworkConfig.agentEngine,
@@ -1828,6 +1838,7 @@ const Settings: React.FC<SettingsProps> = ({
     coworkConfig.dreamingFrequency,
     coworkConfig.dreamingModel,
     coworkConfig.dreamingTimezone,
+    coworkConfig.autoModelRouting,
   ]);
 
   const refreshTempStorageUsage = useCallback(async () => {
@@ -2851,7 +2862,8 @@ const Settings: React.FC<SettingsProps> = ({
     || embeddingRemoteBaseUrl !== (coworkConfig.embeddingRemoteBaseUrl ?? '')
     || embeddingRemoteApiKey !== (coworkConfig.embeddingRemoteApiKey ?? '')
     || dreamingEnabled !== (coworkConfig.dreamingEnabled ?? false)
-    || dreamingFrequency !== (coworkConfig.dreamingFrequency ?? '0 3 * * *');
+    || dreamingFrequency !== (coworkConfig.dreamingFrequency ?? '0 3 * * *')
+    || !isSameAutoModelRoutingConfig(autoModelRouting, coworkConfig.autoModelRouting);
   const isOpenClawAgentEngine = coworkAgentEngine === 'openclaw';
 
   const openClawProgressPercent = useMemo(() => {
@@ -3558,6 +3570,7 @@ const Settings: React.FC<SettingsProps> = ({
           dreamingFrequency,
           dreamingModel,
           dreamingTimezone,
+          autoModelRouting,
         });
         if (!updated) {
           throw new Error(i18nService.t('coworkConfigSaveFailed'));
@@ -5294,6 +5307,11 @@ const Settings: React.FC<SettingsProps> = ({
                     </div>
                   </div>
                 </section>
+
+                <AutoModelRoutingSettings
+                  value={autoModelRouting}
+                  onChange={setAutoModelRouting}
+                />
 
                 <section className="space-y-3">
                   <h4 className="text-sm font-medium text-foreground">

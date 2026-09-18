@@ -1,6 +1,12 @@
 import { expect, test } from 'vitest';
 
 import {
+  AutoModelCategory,
+  AutoModelResolveReason,
+  COWORK_AUTO_MODEL_REF,
+  DEFAULT_COWORK_AUTO_MODEL_ROUTING_CONFIG,
+} from '../../../shared/cowork/autoModelRouting';
+import {
   COWORK_BTW_EPHEMERAL_THREAD_LIMIT,
   COWORK_BTW_THREAD_CONTENT_MAX_CHARS,
   COWORK_BTW_THREAD_ENTRY_LIMIT,
@@ -22,6 +28,7 @@ import coworkReducer, {
   clearBtwComposerIfUnchanged,
   clearCurrentSession,
   clearMediaAccountState,
+  clearSessionAutoResolvedModel,
   closeBtwThread,
   deleteSession,
   finishSessionNavigation,
@@ -35,8 +42,10 @@ import coworkReducer, {
   setMediaModels,
   setMediaSelection,
   setMessageWindow,
+  setSessionAutoResolvedModel,
   setSessions,
   settleBtwEntry,
+  updateCurrentSessionMaxMode,
   updateCurrentSessionModelOverride,
   updateMessageContent,
   updateSessionGoal,
@@ -201,6 +210,7 @@ test('setConfig preserves loaded OpenClaw session policy', () => {
     dreamingFrequency: '0 3 * * *',
     dreamingModel: '',
     dreamingTimezone: '',
+    autoModelRouting: DEFAULT_COWORK_AUTO_MODEL_ROUTING_CONFIG,
     openClawSessionPolicy: {
       keepAlive: '365d',
     },
@@ -235,6 +245,48 @@ test('updateCurrentSessionModelOverride only patches the active session', () => 
   );
 
   expect(ignoredState.currentSession?.modelOverride).toBe('lobsterai-server/qwen3.6-plus-YoudaoInner');
+});
+
+test('updateCurrentSessionMaxMode toggles Max without touching the model selection', () => {
+  const session = makeSession({ modelOverride: COWORK_AUTO_MODEL_REF });
+  const enabledState = coworkReducer(
+    coworkReducer(undefined, addSession(session)),
+    updateCurrentSessionMaxMode({ sessionId: 'session-1', maxMode: true }),
+  );
+
+  expect(enabledState.currentSession?.maxMode).toBe(true);
+  expect(enabledState.currentSession?.modelOverride).toBe(COWORK_AUTO_MODEL_REF);
+
+  const ignoredState = coworkReducer(
+    enabledState,
+    updateCurrentSessionMaxMode({ sessionId: 'session-2', maxMode: false }),
+  );
+  expect(ignoredState.currentSession?.maxMode).toBe(true);
+
+  const disabledState = coworkReducer(
+    ignoredState,
+    updateCurrentSessionMaxMode({ sessionId: 'session-1', maxMode: false }),
+  );
+  expect(disabledState.currentSession?.maxMode).toBe(false);
+  expect(disabledState.currentSession?.modelOverride).toBe(COWORK_AUTO_MODEL_REF);
+});
+
+test('auto-resolved models are tracked per session and cleared independently', () => {
+  const resolvedState = coworkReducer(
+    undefined,
+    setSessionAutoResolvedModel({
+      sessionId: 'session-1',
+      resolved: {
+        modelRef: 'anthropic/claude-vision',
+        reason: AutoModelResolveReason.Auto,
+        category: AutoModelCategory.Vision,
+      },
+    }),
+  );
+  expect(resolvedState.autoResolvedModelBySessionId['session-1']?.modelRef).toBe('anthropic/claude-vision');
+
+  const clearedState = coworkReducer(resolvedState, clearSessionAutoResolvedModel('session-1'));
+  expect(clearedState.autoResolvedModelBySessionId['session-1']).toBeUndefined();
 });
 
 test('updateSessionTitle preserves the session updated time', () => {

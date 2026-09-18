@@ -1,3 +1,4 @@
+import { isAutoModelRef } from '@shared/cowork/autoModelRouting';
 import { supportsLobsterAIRequestOptionsV1 } from '@shared/providers/lobsterAIRequestOptions';
 import {
   getModelThinkingLevels,
@@ -66,7 +67,11 @@ export function resolveAgentModelSelection({
   availableModels,
   fallbackModel,
 }: ResolveAgentModelSelectionInput): ResolveAgentModelSelectionResult {
-  const normalizedSessionModel = sessionModel?.trim() ?? '';
+  const rawSessionModel = sessionModel?.trim() ?? '';
+  // The Auto sentinel is a valid selection resolved per turn in the main
+  // process. It is never an invalid explicit model; capability checks use the
+  // agent model it falls back to.
+  const normalizedSessionModel = isAutoModelRef(rawSessionModel) ? '' : rawSessionModel;
   if (normalizedSessionModel) {
     const explicitSessionModel = resolveOpenClawModelRef(normalizedSessionModel, availableModels) ?? null;
     if (explicitSessionModel) {

@@ -1,3 +1,4 @@
+import { COWORK_AUTO_MODEL_REF } from '@shared/cowork/autoModelRouting';
 import { LobsterAIRequestCapability } from '@shared/providers/lobsterAIRequestOptions';
 import { ModelThinkingLevel } from '@shared/providers/modelThinking';
 import { describe, expect, test } from 'vitest';
@@ -64,6 +65,34 @@ describe('resolveModelThinkingLevel', () => {
 });
 
 describe('resolveAgentModelSelection', () => {
+  test('treats the Auto sentinel as a valid selection that uses the agent model for capabilities', () => {
+    const result = resolveAgentModelSelection({
+      sessionModel: COWORK_AUTO_MODEL_REF,
+      agentModel: 'anthropic/claude-sonnet-4',
+      availableModels: models,
+      fallbackModel: models[0],
+      engine: 'openclaw',
+    });
+
+    expect(result.selectedModel?.id).toBe('claude-sonnet-4');
+    expect(result.usesFallback).toBe(false);
+    expect(result.hasInvalidExplicitModel).toBe(false);
+  });
+
+  test('falls back without flagging an invalid model when Auto has no usable agent model', () => {
+    const result = resolveAgentModelSelection({
+      sessionModel: ' LobsterAI/__AUTO__ ',
+      agentModel: '',
+      availableModels: models,
+      fallbackModel: models[0],
+      engine: 'openclaw',
+    });
+
+    expect(result.selectedModel?.id).toBe('gpt-4o');
+    expect(result.usesFallback).toBe(true);
+    expect(result.hasInvalidExplicitModel).toBe(false);
+  });
+
   test('uses explicit agent model when present', () => {
     const result = resolveAgentModelSelection({
       agentModel: 'anthropic/claude-sonnet-4',
