@@ -26,6 +26,10 @@ import {
   OpenClawBrowserGatewayMethod,
 } from '../../../shared/browserWebAccess/constants';
 import {
+  type CoworkAutoModelResolvedEvent,
+  isAutoModelRef,
+} from '../../../shared/cowork/autoModelRouting';
+import {
   buildBrowserAnnotationPromptSection,
   type CoworkBrowserAnnotationMessageBatch,
 } from '../../../shared/cowork/browserAnnotations';
@@ -134,6 +138,11 @@ import {
   findReusableCommittedAssistantMessageId,
   findReusableFinalAssistantMessageId,
 } from './assistantMessageReconciliation';
+import {
+  type AutoModelRoutingSource,
+  type AutoTurnModelResolution,
+  resolveAutoTurnModel,
+} from './autoModelRouter';
 import {
   resolveChannelSessionNextStatus,
   resolveChannelSessionTerminalStatus,
@@ -498,6 +507,8 @@ type ChannelSessionLifecycleRun = {
 
 type OpenClawRuntimeAdapterOptions = {
   normalizeModelRef?: (modelRef: string) => string;
+  /** Local candidates and overrides for the Cowork Auto/Max model modes. */
+  getAutoModelRoutingSource?: () => AutoModelRoutingSource | null;
   onChannelPromptSubmit?: (event: {
     agentId: string;
     conversationState: PromptAnalyticsConversationStateValue;
@@ -3821,6 +3832,60 @@ export class OpenClawRuntimeAdapter extends EventEmitter implements CoworkRuntim
     return rawModel ? this.normalizeModelRef(rawModel) : '';
   }
 
+  /** Display-only: the concrete model an Auto/Max turn runs on. */
+  private emitSessionModelAutoResolved(sessionId: string, resolution: AutoTurnModelResolution): void {
+    const payload: CoworkAutoModelResolvedEvent = {
+      sessionId,
+      modelRef: resolution.modelRef,
+      reason: resolution.reason,
+      ...(resolution.category ? { category: resolution.category } : {}),
+    };
+    for (const win of BrowserWindow.getAllWindows()) {
+      if (!win.isDestroyed()) {
+        win.webContents.send(CoworkIpcChannel.SessionModelAutoResolved, payload);
+      }
+    }
+  }
+
+  /**
+   * Resolve the model for a turn under Auto/Max. Returns null for sessions on
+   * a normal explicit/agent model. Never mutates `session.modelOverride`.
+   */
+  private resolveAutoTurnModelForSession(
+    session: CoworkSession,
+    agent: Agent | null,
+    turn: {
+      prompt: string;
+      imageAttachmentCount: number;
+      selectedTextSnippets?: CoworkSelectedTextSnippet[];
+    },
+  ): AutoTurnModelResolution | null {
+    const autoSelected = isAutoModelRef(session.modelOverride);
+    const maxMode = session.maxMode === true;
+    if (!autoSelected && !maxMode) return null;
+
+    const rawAgentModel = agent?.model?.trim() ?? '';
+    const agentModel = rawAgentModel ? this.normalizeModelRef(rawAgentModel) : '';
+    const baseModelRef = autoSelected ? agentModel : (session.modelOverride || agentModel);
+    let source: AutoModelRoutingSource | null = null;
+    try {
+      source = this.options.getAutoModelRoutingSource?.() ?? null;
+    } catch (error) {
+      console.warn('[AutoModelRouter] failed to read the local routing source; using the agent model.', error);
+    }
+    return resolveAutoTurnModel({
+      input: {
+        prompt: turn.prompt,
+        imageAttachmentCount: turn.imageAttachmentCount,
+        contextText: (turn.selectedTextSnippets ?? []).map(snippet => snippet.text ?? '').join('\n'),
+      },
+      source,
+      baseModelRef,
+      autoSelected,
+      maxMode,
+    });
+  }
+
   private notifySessionModelOverrideChanged(sessionId: string, modelOverride: string): void {
     for (const win of BrowserWindow.getAllWindows()) {
       if (!win.isDestroyed()) {
@@ -3841,6 +3906,9 @@ export class OpenClawRuntimeAdapter extends EventEmitter implements CoworkRuntim
     if (!state) return false;
     const session = this.store.getSession(coworkSessionId);
     if (!session) return false;
+    // Auto is a local selection; the gateway only ever sees the per-turn model,
+    // so its echo must not replace the stored sentinel.
+    if (isAutoModelRef(session.modelOverride)) return false;
 
     const normalizedModelRef = state.modelRef ? this.normalizeModelRef(state.modelRef) : '';
     const agentDefaultModel = this.resolveAgentDefaultModelRef(session);
@@ -5164,7 +5232,7 @@ export class OpenClawRuntimeAdapter extends EventEmitter implements CoworkRuntim
       : undefined;
     const thinkingModelRef = normalizedPatch.model !== undefined
       ? (normalizedPatch.model || this.resolveAgentDefaultModelRef(session))
-      : (session.modelOverride
+      : (session.modelOverride && !isAutoModelRef(session.modelOverride)
           ? this.normalizeModelRef(session.modelOverride)
           : this.resolveAgentDefaultModelRef(session));
     const gatewayPatch: OpenClawSessionPatch = {
@@ -5623,13 +5691,24 @@ export class OpenClawRuntimeAdapter extends EventEmitter implements CoworkRuntim
     const turnToken = this.nextTurnToken(sessionId);
 
     const agent = this.store.getAgent(agentId);
-    const rawCurrentModel = session.modelOverride || agent?.model || '';
+    // Auto/Max: resolve the concrete model for this turn only. The stored
+    // selection (the Auto sentinel or the Max flag) is never written back.
+    const autoResolution = this.resolveAutoTurnModelForSession(session, agent, {
+      prompt,
+      imageAttachmentCount: options.imageAttachments?.length ?? 0,
+      selectedTextSnippets: options.selectedTextSnippets,
+    });
+    // The sentinel itself must never reach the gateway: without a resolution
+    // an Auto session runs on the agent model.
+    const sessionModelOverride = isAutoModelRef(session.modelOverride) ? '' : session.modelOverride;
+    const explicitModelOverride = autoResolution?.modelRef || sessionModelOverride;
+    const rawCurrentModel = explicitModelOverride || agent?.model || '';
     // Normalize only agent-level model refs (may need provider migration).
     // Session modelOverride is user-selected and must not be rewritten.
-    const currentModel = session.modelOverride
+    const currentModel = explicitModelOverride
       ? rawCurrentModel
       : (rawCurrentModel ? this.normalizeModelRef(rawCurrentModel) : '');
-    if (!session.modelOverride && currentModel && currentModel !== rawCurrentModel && agent?.id) {
+    if (!explicitModelOverride && currentModel && currentModel !== rawCurrentModel && agent?.id) {
       this.store.updateAgent(agent.id, { model: currentModel });
     }
     try {
@@ -5639,7 +5718,9 @@ export class OpenClawRuntimeAdapter extends EventEmitter implements CoworkRuntim
         sessionKey,
         model: currentModel,
         thinkingLevel: session.thinkingLevel || undefined,
-        source: session.modelOverride
+        // A resolved Auto/Max model differs from the agent default, so it is
+        // patched as a session override rather than skipped as confirmed.
+        source: explicitModelOverride
           ? SessionModelPatchSource.SessionOverride
           : SessionModelPatchSource.AgentModel,
       });
@@ -5654,6 +5735,16 @@ export class OpenClawRuntimeAdapter extends EventEmitter implements CoworkRuntim
         `Elapsed ${formatTimingDuration(firstResponseTiming.modelPatchStartedAtMs, firstResponseTiming.modelPatchEndedAtMs)}.`,
         `Total ${formatTimingOffset(firstResponseTiming.turnStartedAtMs, firstResponseTiming.modelPatchEndedAtMs)}.`,
       );
+      if (autoResolution) {
+        console.log(
+          '[AutoModelRouter] resolved model for turn.',
+          `Session ${sessionId}.`,
+          `Reason ${autoResolution.reason}.`,
+          `Category ${autoResolution.category ?? 'none'}.`,
+          `Model ${autoResolution.modelRef}.`,
+        );
+        this.emitSessionModelAutoResolved(sessionId, autoResolution);
+      }
     } catch (error) {
       this.store.updateSession(sessionId, { status: 'error' });
       const message = error instanceof Error ? error.message : String(error);
@@ -5728,6 +5819,7 @@ export class OpenClawRuntimeAdapter extends EventEmitter implements CoworkRuntim
       options.selectedTextSnippets,
       options.browserAnnotations,
       firstResponseTiming,
+      currentModel,
     ));
     if (this.cancelTurnStartupIfStopped(sessionId, 'outbound prompt built')) {
       return;
@@ -5864,6 +5956,7 @@ export class OpenClawRuntimeAdapter extends EventEmitter implements CoworkRuntim
     selectedTextSnippets?: CoworkSelectedTextSnippet[],
     browserAnnotations?: CoworkBrowserAnnotationMessageBatch[],
     firstResponseTiming?: FirstResponseTiming,
+    resolvedModelRef?: string,
   ): Promise<string> {
     const normalizedSystemPrompt = (systemPrompt ?? '').trim();
     const planMode = isPlanModeSystemPrompt(normalizedSystemPrompt);
@@ -5881,7 +5974,10 @@ export class OpenClawRuntimeAdapter extends EventEmitter implements CoworkRuntim
 
     const session = this.store.getSession(sessionId);
     const agent = agentId ? this.store.getAgent(agentId) : null;
-    const rawCurrentModel = session?.modelOverride || agent?.model || '';
+    // Prefer the model this turn actually runs on; under Auto the stored
+    // override is the sentinel and must never leak into the prompt.
+    const storedModelRef = isAutoModelRef(session?.modelOverride) ? '' : session?.modelOverride;
+    const rawCurrentModel = resolvedModelRef?.trim() || storedModelRef || agent?.model || '';
     const currentModel = rawCurrentModel ? this.normalizeModelRef(rawCurrentModel) : '';
 
     const sections: string[] = [];
@@ -6735,7 +6831,7 @@ export class OpenClawRuntimeAdapter extends EventEmitter implements CoworkRuntim
 
   private resolveCurrentModelForSession(sessionId: string): string {
     const session = this.store.getSession(sessionId);
-    if (session?.modelOverride) {
+    if (session?.modelOverride && !isAutoModelRef(session.modelOverride)) {
       return session.modelOverride;
     }
     const agent = session?.agentId ? this.store.getAgent(session.agentId) : null;

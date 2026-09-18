@@ -45,6 +45,7 @@ import {
   type BrowserRuntimeProfile,
 } from '../shared/browserWebAccess/constants';
 import { ClipboardIpc } from '../shared/clipboard/constants';
+import type { CoworkAutoModelResolvedEvent } from '../shared/cowork/autoModelRouting';
 import type { CoworkBrowserAnnotationMessageBatch } from '../shared/cowork/browserAnnotations';
 import type {
   CoworkBtwAbortRequest,
@@ -533,6 +534,7 @@ contextBridge.exposeInMainWorld('electron', {
       agentId?: string;
       modelOverride?: string;
       thinkingLevel?: string;
+      maxMode?: boolean;
       imageAttachments?: Array<{ name: string; mimeType: string; base64Data: string; sizeBytes?: number; localPath?: string; previewMimeType?: string; previewBase64Data?: string }>;
       mediaSelection?: { mode: string; modelId?: string; modelName?: string; imageModelId?: string; videoModelId?: string }; mediaReferences?: Array<{ token: string; mediaType: string; index: number; fileId: string; fileName: string; mimeType: string; localPath?: string; remoteUrl?: string; dataUrl?: string; role?: string }>;
     }) => ipcRenderer.invoke('cowork:session:start', options),
@@ -576,6 +578,8 @@ contextBridge.exposeInMainWorld('electron', {
       ipcRenderer.invoke(CoworkIpcChannel.DeleteSessions, sessionIds),
     setSessionPinned: (options: { sessionId: string; pinned: boolean }) =>
       ipcRenderer.invoke('cowork:session:pin', options),
+    setSessionMaxMode: (options: { sessionId: string; enabled: boolean }) =>
+      ipcRenderer.invoke(CoworkIpcChannel.SessionSetMaxMode, options),
     renameSession: (options: { sessionId: string; title: string }) =>
       ipcRenderer.invoke('cowork:session:rename', options),
     forkSession: (options: {
@@ -804,6 +808,11 @@ contextBridge.exposeInMainWorld('electron', {
       const handler = (_event: any, data: { sessionId: string; modelOverride: string }) => callback(data);
       ipcRenderer.on(CoworkIpcChannel.SessionModelOverrideChanged, handler);
       return () => ipcRenderer.removeListener(CoworkIpcChannel.SessionModelOverrideChanged, handler);
+    },
+    onSessionModelAutoResolved: (callback: (data: CoworkAutoModelResolvedEvent) => void) => {
+      const handler = (_event: Electron.IpcRendererEvent, data: CoworkAutoModelResolvedEvent) => callback(data);
+      ipcRenderer.on(CoworkIpcChannel.SessionModelAutoResolved, handler);
+      return () => ipcRenderer.removeListener(CoworkIpcChannel.SessionModelAutoResolved, handler);
     },
     onOpenSessionFromNotification: (callback: (data: { sessionId: string }) => void) => {
       const handler = (_event: any, data: { sessionId: string }) => callback(data);

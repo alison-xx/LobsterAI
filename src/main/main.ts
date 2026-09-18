@@ -82,6 +82,12 @@ import {
 } from '../shared/browserWebAccess/constants';
 import { ClipboardIpc } from '../shared/clipboard/constants';
 import {
+  type AutoRoutingCandidate,
+  COWORK_AUTO_MODEL_REF,
+  isAutoModelRef,
+  normalizeAutoModelRoutingConfig,
+} from '../shared/cowork/autoModelRouting';
+import {
   type CoworkBrowserAnnotationMessageBatch,
   normalizeBrowserAnnotationBatches,
 } from '../shared/cowork/browserAnnotations';
@@ -1677,6 +1683,62 @@ const buildAvailableOpenClawProviders = (): Record<string, { models: Array<{ id:
   return providerMap;
 };
 
+// Server models the signed-in account can see but not use (subscription
+// gated). Refreshed whenever the server model list is loaded.
+let inaccessibleServerModelIds = new Set<string>();
+
+/**
+ * Models the Cowork Auto/Max router may pick: every model of an enabled,
+ * configured provider plus server models that are accessible and pass the
+ * server run gate. Order matches the model selector (server models first).
+ */
+const listAutoModelRoutingCandidates = (): AutoRoutingCandidate[] => {
+  const candidates: AutoRoutingCandidate[] = [];
+  const seen = new Set<string>();
+  const push = (candidate: AutoRoutingCandidate): void => {
+    const key = candidate.ref.toLowerCase();
+    if (!candidate.ref || seen.has(key)) return;
+    seen.add(key);
+    candidates.push(candidate);
+  };
+
+  for (const model of getAllServerModelMetadata()) {
+    const modelId = model.modelId.trim();
+    if (!modelId || inaccessibleServerModelIds.has(modelId)) continue;
+    if (!evaluateServerModelRunGate(modelId).allowed) continue;
+    push({
+      ref: `${OpenClawProviderId.LobsteraiServer}/${modelId}`,
+      name: model.modelName || modelId,
+      supportsImage: model.supportsImage === true,
+      contextWindow: model.contextWindow,
+    });
+  }
+
+  for (const provider of resolveAllEnabledProviderConfigs()) {
+    for (const model of provider.models) {
+      const selection = buildProviderSelection({
+        apiKey: provider.apiKey,
+        baseURL: provider.baseURL,
+        modelId: model.id,
+        apiType: provider.apiType,
+        providerName: provider.providerName,
+        authType: provider.authType,
+        codingPlanEnabled: provider.codingPlanEnabled,
+        supportsImage: model.supportsImage,
+        modelName: model.name,
+      });
+      push({
+        ref: selection.primaryModel,
+        name: model.name || model.id,
+        supportsImage: model.supportsImage === true,
+        contextWindow: model.contextWindow,
+      });
+    }
+  }
+
+  return candidates;
+};
+
 const openClawConfigHasServerModels = (modelIds: string[]): boolean => {
   const normalizedModelIds = modelIds.map(modelId => modelId.trim()).filter(Boolean);
   if (normalizedModelIds.length === 0) return true;
@@ -2505,6 +2567,10 @@ const isLobsteraiServerModelRef = (modelRef: string): boolean => {
 const shouldRefreshServerQuotaForSession = (sessionId: string): boolean => {
   const session = getCoworkStore().getSession(sessionId);
   const sessionModelRef = session?.modelOverride?.trim();
+  if (session?.maxMode || isAutoModelRef(sessionModelRef)) {
+    // Auto/Max pick the model per turn; refresh whenever server models exist.
+    return getAllServerModelMetadata().length > 0;
+  }
   if (sessionModelRef) {
     return isLobsteraiServerModelRef(sessionModelRef);
   }
@@ -3711,6 +3777,10 @@ const getCoworkEngineRouter = () => {
         getOpenClawEngineManager(),
         {
           normalizeModelRef: normalizeOpenClawModelRef,
+          getAutoModelRoutingSource: () => ({
+            candidates: listAutoModelRoutingCandidates(),
+            config: getCoworkStore().getConfig().autoModelRouting,
+          }),
           onChannelPromptSubmit: event => {
             void getMainLogReporter().report({
               action: LogReporterAction.ImPromptSubmit,
@@ -5674,6 +5744,9 @@ if (!gotTheLock) {
     }
 
     const serverModelsChanged = updateServerModelMetadata(data.data);
+    inaccessibleServerModelIds = new Set(
+      data.data.filter(model => model.accessible === false).map(model => model.modelId),
+    );
     const serverModelIds = data.data.map(model => model.modelId);
     const serverModelsMissingFromConfig = !openClawConfigHasServerModels(serverModelIds);
     const configSyncOptions = {
@@ -5749,8 +5822,14 @@ if (!gotTheLock) {
       ? getCoworkStore().getSession(options.sessionId)
       : null;
     const agentId = options.agentId?.trim() || session?.agentId || 'main';
-    const rawModelRef = options.modelOverride?.trim()
-      || session?.modelOverride?.trim()
+    // The Auto sentinel is resolved per turn by the runtime adapter from
+    // candidates that already passed the run gate; gate its agent fallback.
+    const concreteRef = (ref: string | undefined): string => {
+      const trimmed = ref?.trim() ?? '';
+      return isAutoModelRef(trimmed) ? '' : trimmed;
+    };
+    const rawModelRef = concreteRef(options.modelOverride)
+      || concreteRef(session?.modelOverride)
       || getAgentManager().getAgent(agentId)?.model?.trim()
       || resolveDefaultAgentModelRef();
     return rawModelRef?.trim() || '';
@@ -9278,6 +9357,7 @@ if (!gotTheLock) {
         agentId?: string;
         modelOverride?: string;
         thinkingLevel?: string;
+        maxMode?: boolean;
         mediaSelection?: {
           mode: 'auto' | 'image' | 'video' | 'none';
           modelId?: string;
@@ -9380,7 +9460,7 @@ if (!gotTheLock) {
           runtimeSkillIds || [],
           options.agentId || 'main',
           options.modelOverride || '',
-          { thinkingLevel: thinkingLevel || '' },
+          { thinkingLevel: thinkingLevel || '', maxMode: options.maxMode === true },
         );
 
         if (options.modelOverride) {
@@ -9389,6 +9469,9 @@ if (!gotTheLock) {
             session.id,
             options.modelOverride,
           );
+        }
+        if (options.maxMode === true) {
+          console.log('[Cowork:StartSession] session created with Max mode enabled:', session.id);
         }
 
         const skinTurn = getSkinRuntimeController().prepareTurn({
@@ -10817,11 +10900,26 @@ if (!gotTheLock) {
       }
 
       const patch = sanitizeOpenClawSessionPatch(request.patch);
-      if (patch.model) {
+      // Auto is a local selection: store the sentinel, but never send it to the
+      // gateway. The next turn patches the concrete model it resolves to.
+      const selectsAutoModel = isAutoModelRef(patch.model);
+      if (selectsAutoModel) {
+        delete patch.model;
+      } else if (patch.model) {
         patch.model = normalizeOpenClawModelRef(patch.model);
       }
       const runtime = getCoworkEngineRouter();
-      const patchResult = await runtime.patchSession(sessionId, patch);
+      const patchResult = Object.keys(patch).length > 0
+        ? await runtime.patchSession(sessionId, patch)
+        : {};
+      if (selectsAutoModel) {
+        getCoworkStore().updateSession(
+          sessionId,
+          { modelOverride: COWORK_AUTO_MODEL_REF },
+          { touchUpdatedAt: false },
+        );
+        console.log(`[Cowork:PatchSession] session ${sessionId} switched to Auto model routing.`);
+      }
 
       if (patch.model !== undefined || patch.thinkingLevel !== undefined) {
         const sessionUpdates: {
@@ -10855,6 +10953,30 @@ if (!gotTheLock) {
       return {
         success: false,
         error: error instanceof Error ? error.message : 'Failed to patch OpenClaw session',
+      };
+    }
+  });
+
+  ipcMain.handle(CoworkIpcChannel.SessionSetMaxMode, async (_event, input: unknown) => {
+    try {
+      const request = input && typeof input === 'object' && !Array.isArray(input)
+        ? input as { sessionId?: unknown; enabled?: unknown }
+        : {};
+      const sessionId = typeof request.sessionId === 'string' ? request.sessionId.trim() : '';
+      if (!sessionId) {
+        throw new Error('Session ID is required.');
+      }
+      if (!getCoworkStore().getSession(sessionId, 0)) {
+        throw new Error(`Session ${sessionId} not found`);
+      }
+      const enabled = request.enabled === true;
+      getCoworkStore().updateSession(sessionId, { maxMode: enabled }, { touchUpdatedAt: false });
+      console.log(`[Cowork:SetMaxMode] session ${sessionId} Max mode ${enabled ? 'enabled' : 'disabled'}.`);
+      return { success: true, session: getCoworkStore().getSession(sessionId) };
+    } catch (error) {
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : 'Failed to set Max mode',
       };
     }
   });
@@ -11188,6 +11310,7 @@ if (!gotTheLock) {
     embeddingVectorWeight?: number;
     embeddingRemoteBaseUrl?: string;
     embeddingRemoteApiKey?: string;
+    autoModelRouting?: unknown;
   }) => {
     try {
       const normalizedExecutionMode =
@@ -11245,6 +11368,9 @@ if (!gotTheLock) {
         openClawSkillReviewEnabled: normalizedOpenClawSkillReviewEnabled,
         openClawMemoryFlushEnabled: normalizedOpenClawMemoryFlushEnabled,
         ...normalizedEmbedding,
+        autoModelRouting: config.autoModelRouting === undefined
+          ? undefined
+          : normalizeAutoModelRoutingConfig(config.autoModelRouting),
       };
       const previousConfig = getCoworkStore().getConfig();
       const previousWorkingDir = previousConfig.workingDirectory;

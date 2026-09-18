@@ -116,7 +116,7 @@ test('backfills agent working directories from legacy cowork config only once', 
   reopenedStore.close();
 });
 
-test('installs required thinking columns independently from best-effort legacy migrations', async () => {
+test('installs required thinking and Max mode columns independently from best-effort legacy migrations', async () => {
   const userDataPath = createTempUserDataPath();
   createLegacyDatabase(userDataPath);
 
@@ -152,6 +152,9 @@ test('installs required thinking columns independently from best-effort legacy m
   ).all() as Array<{ id: string; thinking_level: string }>;
 
   expect(session.thinking_level).toBe('');
+  expect(
+    db.prepare("SELECT max_mode FROM cowork_sessions WHERE id = 'legacy-session'").get(),
+  ).toEqual({ max_mode: 0 });
   expect(agents).toEqual([
     { id: 'docs', thinking_level: '' },
     { id: 'main', thinking_level: '' },
@@ -162,9 +165,9 @@ test('installs required thinking columns independently from best-effort legacy m
   const reopenedStore = await SqliteStore.create(userDataPath);
   expect(
     reopenedStore.getDatabase().prepare(
-      "SELECT thinking_level FROM cowork_sessions WHERE id = 'legacy-session'",
+      "SELECT thinking_level, max_mode FROM cowork_sessions WHERE id = 'legacy-session'",
     ).get(),
-  ).toEqual({ thinking_level: '' });
+  ).toEqual({ thinking_level: '', max_mode: 0 });
   reopenedStore.close();
 });
 

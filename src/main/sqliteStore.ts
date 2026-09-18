@@ -110,6 +110,7 @@ export class SqliteStore {
         system_prompt TEXT NOT NULL DEFAULT '',
         model_override TEXT NOT NULL DEFAULT '',
         thinking_level TEXT NOT NULL DEFAULT '',
+        max_mode INTEGER NOT NULL DEFAULT 0,
         execution_mode TEXT,
         parent_session_id TEXT,
         forked_from_message_id TEXT,
@@ -369,6 +370,20 @@ export class SqliteStore {
       }
     } catch (error) {
       console.error('[SqliteStore] failed to add cowork_sessions.thinking_level:', error);
+      throw error;
+    }
+
+    // `max_mode` is also selected by every Cowork session read (Cowork Max
+    // mode), so it follows the same required-migration rule.
+    try {
+      const sessionCols = this.db.pragma('table_info(cowork_sessions)') as Array<{ name: string }>;
+      if (!sessionCols.some(column => column.name.toLowerCase() === 'max_mode')) {
+        this.db.exec('ALTER TABLE cowork_sessions ADD COLUMN max_mode INTEGER NOT NULL DEFAULT 0;');
+        this.didRunMigration = true;
+        console.log('[SqliteStore] added required cowork_sessions.max_mode column');
+      }
+    } catch (error) {
+      console.error('[SqliteStore] failed to add cowork_sessions.max_mode:', error);
       throw error;
     }
 

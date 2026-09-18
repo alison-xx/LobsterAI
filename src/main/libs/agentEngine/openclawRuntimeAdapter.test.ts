@@ -24,6 +24,12 @@ import {
   OpenClawBrowserGatewayMethod,
 } from '../../../shared/browserWebAccess/constants';
 import {
+  AutoModelCategory,
+  AutoModelResolveReason,
+  COWORK_AUTO_MODEL_REF,
+  DEFAULT_COWORK_AUTO_MODEL_ROUTING_CONFIG,
+} from '../../../shared/cowork/autoModelRouting';
+import {
   BrowserAnnotationAnchorKind,
   BrowserAnnotationScreenshotStatus,
 } from '../../../shared/cowork/browserAnnotations';
@@ -43,6 +49,7 @@ import {
   __openClawTokenProxyTestUtils,
   consumeRecentOpenClawTokenProxyQuotaError,
 } from '../openclawTokenProxy';
+import type { AutoModelRoutingSource } from './autoModelRouter';
 import { AgentEventStream, AgentLifecyclePhase, OpenClawChatState, OpenClawGatewayMethod } from './constants';
 import { ContinuityCapsuleSource } from './coworkContinuityCapsule';
 import {
@@ -3253,6 +3260,8 @@ function createRunTurnAdapter(options: {
   autoFinalizeChatSend?: boolean;
   holdChatSend?: boolean;
   stateDir?: string;
+  sessionMaxMode?: boolean;
+  autoModelRoutingSource?: AutoModelRoutingSource | null;
 } = {}) {
   const session = {
     id: 'session-1',
@@ -3263,6 +3272,7 @@ function createRunTurnAdapter(options: {
     cwd: options.sessionCwd ?? '',
     systemPrompt: '',
     modelOverride: options.sessionModelOverride ?? '',
+    maxMode: options.sessionMaxMode ?? false,
     executionMode: 'local',
     activeSkillIds: [],
     agentId: 'main',
@@ -3329,7 +3339,13 @@ function createRunTurnAdapter(options: {
       clientEntryPath: '/tmp/openclaw-gateway-client.js',
     }),
   };
-  const adapter = new OpenClawRuntimeAdapter(store as never, engineManager as never);
+  const adapter = new OpenClawRuntimeAdapter(
+    store as never,
+    engineManager as never,
+    options.autoModelRoutingSource !== undefined
+      ? { getAutoModelRoutingSource: () => options.autoModelRoutingSource ?? null }
+      : undefined,
+  );
   adapter.gatewayClient = {
     start: () => {},
     stop: () => {},
@@ -4042,6 +4058,127 @@ test('continueSession patches a session override before chat.send even when the 
     model,
     reasoningLevel: 'stream',
   });
+});
+
+const autoRoutingTestSource = (
+  overrides: Partial<typeof DEFAULT_COWORK_AUTO_MODEL_ROUTING_CONFIG> = {},
+): AutoModelRoutingSource => ({
+  candidates: [
+    { ref: 'lobsterai-server/qwen3.5-plus-YoudaoInner', name: 'Qwen', supportsImage: false, contextWindow: 128_000 },
+    { ref: 'openai/gpt-vision', name: 'GPT Vision', supportsImage: true, contextWindow: 200_000 },
+    { ref: 'anthropic/claude-code', name: 'Claude Code', supportsImage: false, contextWindow: 200_000 },
+  ],
+  config: { ...DEFAULT_COWORK_AUTO_MODEL_ROUTING_CONFIG, ...overrides },
+});
+
+test('Auto sessions patch the per-turn model and never send or overwrite the sentinel', async () => {
+  const { adapter, requests, session } = createRunTurnAdapter({
+    sessionModelOverride: COWORK_AUTO_MODEL_REF,
+    autoModelRoutingSource: autoRoutingTestSource({ codeModel: 'anthropic/claude-code' }),
+  });
+  const resolvedEvents: unknown[] = [];
+  vi.spyOn(adapter as unknown as {
+    emitSessionModelAutoResolved: (sessionId: string, resolution: unknown) => void;
+  }, 'emitSessionModelAutoResolved').mockImplementation((_sessionId, resolution) => {
+    resolvedEvents.push(resolution);
+  });
+
+  await adapter.continueSession('session-1', 'please refactor utils.ts');
+
+  const patch = requests.find(request => request.method === 'sessions.patch');
+  expect(patch?.params.model).toBe('anthropic/claude-code');
+  const chatSend = requests.find(request => request.method === 'chat.send');
+  expect(chatSend?.params.message).toContain('Current model: anthropic/claude-code');
+  expect(JSON.stringify(requests)).not.toContain('__auto__');
+  expect(session.modelOverride).toBe(COWORK_AUTO_MODEL_REF);
+  expect(resolvedEvents).toEqual([{
+    modelRef: 'anthropic/claude-code',
+    reason: AutoModelResolveReason.Auto,
+    category: AutoModelCategory.Code,
+  }]);
+});
+
+test('Auto routes image turns to a vision model and re-resolves on the next turn', async () => {
+  const { adapter, requests, session } = createRunTurnAdapter({
+    sessionModelOverride: COWORK_AUTO_MODEL_REF,
+    autoModelRoutingSource: autoRoutingTestSource(),
+  });
+
+  await adapter.continueSession('session-1', 'what is in this picture?', {
+    imageAttachments: [{ name: 'photo.png', mimeType: 'image/png', base64Data: 'aGVsbG8=' }],
+  });
+  await adapter.continueSession('session-1', 'thanks, how are you?');
+
+  const patchedModels = requests
+    .filter(request => request.method === 'sessions.patch')
+    .map(request => request.params.model);
+  expect(patchedModels).toEqual([
+    'openai/gpt-vision',
+    'lobsterai-server/qwen3.5-plus-YoudaoInner',
+  ]);
+  expect(session.modelOverride).toBe(COWORK_AUTO_MODEL_REF);
+});
+
+test('Auto without a routing source runs on the agent model instead of the sentinel', async () => {
+  const { adapter, requests, session } = createRunTurnAdapter({
+    sessionModelOverride: COWORK_AUTO_MODEL_REF,
+  });
+
+  await adapter.continueSession('session-1', 'hello');
+
+  const patch = requests.find(request => request.method === 'sessions.patch');
+  expect(patch?.params.model).toBe('lobsterai-server/qwen3.5-plus-YoudaoInner');
+  expect(JSON.stringify(requests)).not.toContain('__auto__');
+  expect(session.modelOverride).toBe(COWORK_AUTO_MODEL_REF);
+});
+
+test('Max mode overlays the explicit selection with the configured Max model', async () => {
+  const { adapter, requests, session } = createRunTurnAdapter({
+    sessionModelOverride: 'openai/gpt-vision',
+    sessionMaxMode: true,
+    autoModelRoutingSource: autoRoutingTestSource({ maxModel: 'anthropic/claude-code' }),
+  });
+
+  await adapter.continueSession('session-1', 'hello');
+
+  const patch = requests.find(request => request.method === 'sessions.patch');
+  expect(patch?.params.model).toBe('anthropic/claude-code');
+  expect(session.modelOverride).toBe('openai/gpt-vision');
+  expect(session.maxMode).toBe(true);
+});
+
+test('Max mode without a configured Max model keeps the explicit selection', async () => {
+  const { adapter, requests } = createRunTurnAdapter({
+    sessionModelOverride: 'openai/gpt-vision',
+    sessionMaxMode: true,
+    autoModelRoutingSource: autoRoutingTestSource(),
+  });
+
+  await adapter.continueSession('session-1', 'hello');
+
+  const patch = requests.find(request => request.method === 'sessions.patch');
+  expect(patch?.params.model).toBe('openai/gpt-vision');
+});
+
+test('gateway model echoes do not replace a stored Auto selection', () => {
+  const { adapter, session } = createRunTurnAdapter({
+    sessionModelOverride: COWORK_AUTO_MODEL_REF,
+  });
+
+  const changed = (adapter as unknown as {
+    syncChannelSessionModelOverride: (options: {
+      coworkSessionId: string;
+      openClawSessionKey: string;
+      state: { modelRef: string; explicitOverride: boolean; source: string };
+    }) => boolean;
+  }).syncChannelSessionModelOverride({
+    coworkSessionId: 'session-1',
+    openClawSessionKey: 'agent:main:lobsterai:session-1',
+    state: { modelRef: 'openai/gpt-vision', explicitOverride: true, source: 'history' },
+  });
+
+  expect(changed).toBe(false);
+  expect(session.modelOverride).toBe(COWORK_AUTO_MODEL_REF);
 });
 
 test('continueSession continues after a redundant session override patch times out', async () => {

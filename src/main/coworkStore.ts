@@ -9,6 +9,10 @@ import { v4 as uuidv4 } from 'uuid';
 import { CoworkSystemMessageKind } from '../common/coworkSystemMessages';
 import { AgentId, normalizeAgentAvatarIcon } from '../shared/agent';
 import {
+  type CoworkAutoModelRoutingConfig,
+  normalizeAutoModelRoutingConfig,
+} from '../shared/cowork/autoModelRouting';
+import {
   COWORK_MESSAGE_PAGE_SIZE,
   COWORK_SEARCH_HISTORY_MAX_MESSAGE_CONTENT_CODE_UNITS,
   COWORK_SEARCH_MESSAGE_PAGE_MAX_CONTENT_BYTES,
@@ -526,6 +530,8 @@ export interface CoworkSession {
   systemPrompt: string;
   modelOverride: string;
   thinkingLevel?: ModelThinkingLevel | '';
+  /** Max mode: run turns on the configured Max model, overlaid on the selection. */
+  maxMode?: boolean;
   executionMode: CoworkExecutionMode;
   activeSkillIds: string[];
   agentId: string;
@@ -646,6 +652,8 @@ export interface CoworkConfig {
   dreamingFrequency: string;
   dreamingModel: string;
   dreamingTimezone: string;
+  /** Optional per-category overrides for the Cowork Auto/Max model modes. */
+  autoModelRouting: CoworkAutoModelRoutingConfig;
 }
 
 export type CoworkConfigUpdate = Partial<Pick<
@@ -673,6 +681,7 @@ CoworkConfig,
   | 'dreamingFrequency'
   | 'dreamingModel'
   | 'dreamingTimezone'
+  | 'autoModelRouting'
 >>;
 
 export type PluginSource = 'npm' | 'clawhub' | 'git' | 'local' | 'openclaw';
@@ -781,9 +790,19 @@ interface CoworkSessionSearchOptions {
   agentId?: string;
 }
 
+const parseAutoModelRoutingConfig = (value: string | undefined): CoworkAutoModelRoutingConfig => {
+  if (!value) return normalizeAutoModelRoutingConfig(null);
+  try {
+    return normalizeAutoModelRoutingConfig(JSON.parse(value));
+  } catch {
+    return normalizeAutoModelRoutingConfig(null);
+  }
+};
+
 export interface CreateCoworkSessionOptions {
   scheduledTaskId?: string | null;
   thinkingLevel?: ModelThinkingLevel | '';
+  maxMode?: boolean;
 }
 
 export class CoworkStore {
@@ -963,13 +982,14 @@ export class CoworkStore {
     const now = Date.now();
     const scheduledTaskId = options.scheduledTaskId?.trim() || null;
     const thinkingLevel = options.thinkingLevel ?? '';
+    const maxMode = options.maxMode === true;
 
     this.writeSessionProjections([id], () => {
       this.db
         .prepare(
           `
-        INSERT INTO cowork_sessions (id, title, claude_session_id, scheduled_task_id, status, cwd, system_prompt, model_override, thinking_level, execution_mode, active_skill_ids, agent_id, pinned, created_at, updated_at)
-        VALUES (?, ?, NULL, ?, 'idle', ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)
+        INSERT INTO cowork_sessions (id, title, claude_session_id, scheduled_task_id, status, cwd, system_prompt, model_override, thinking_level, max_mode, execution_mode, active_skill_ids, agent_id, pinned, created_at, updated_at)
+        VALUES (?, ?, NULL, ?, 'idle', ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)
       `,
         )
         .run(
@@ -980,6 +1000,7 @@ export class CoworkStore {
           systemPrompt,
           modelOverride,
           thinkingLevel,
+          maxMode ? 1 : 0,
           executionMode,
           JSON.stringify(activeSkillIds),
           agentId,
@@ -1000,6 +1021,7 @@ export class CoworkStore {
       systemPrompt,
       modelOverride,
       thinkingLevel,
+      maxMode,
       executionMode,
       activeSkillIds,
       agentId,
@@ -1031,6 +1053,7 @@ export class CoworkStore {
       system_prompt: string;
       model_override?: string | null;
       thinking_level?: string | null;
+      max_mode?: number | null;
       execution_mode?: string | null;
       active_skill_ids?: string | null;
       agent_id?: string | null;
@@ -1041,7 +1064,7 @@ export class CoworkStore {
 
     const row = this.getOne<SessionRow>(
       `
-      SELECT id, title, claude_session_id, scheduled_task_id, status, pinned, pin_order, cwd, system_prompt, model_override, thinking_level, execution_mode, active_skill_ids, agent_id, goal_json, created_at, updated_at
+      SELECT id, title, claude_session_id, scheduled_task_id, status, pinned, pin_order, cwd, system_prompt, model_override, thinking_level, max_mode, execution_mode, active_skill_ids, agent_id, goal_json, created_at, updated_at
       FROM cowork_sessions
       WHERE id = ?
     `,
@@ -1079,6 +1102,7 @@ export class CoworkStore {
       systemPrompt: row.system_prompt,
       modelOverride: row.model_override || '',
       thinkingLevel: parseModelThinkingLevel(row.thinking_level) ?? '',
+      maxMode: Boolean(row.max_mode),
       executionMode: (row.execution_mode as CoworkExecutionMode) || 'local',
       activeSkillIds,
       agentId: row.agent_id || 'main',
@@ -1260,13 +1284,13 @@ export class CoworkStore {
     const insertSession = this.db.prepare(
       `
       INSERT INTO cowork_sessions (
-        id, title, claude_session_id, status, cwd, system_prompt, model_override, thinking_level,
+        id, title, claude_session_id, status, cwd, system_prompt, model_override, thinking_level, max_mode,
         execution_mode, active_skill_ids, agent_id, pinned, pin_order,
         parent_session_id, forked_from_message_id, forked_at, fork_mode,
         fork_workspace_path, fork_git_branch, fork_git_base_ref,
         created_at, updated_at
       )
-      VALUES (?, ?, NULL, 'idle', ?, ?, ?, ?, ?, ?, ?, 0, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      VALUES (?, ?, NULL, 'idle', ?, ?, ?, ?, ?, ?, ?, ?, 0, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `,
     );
     const insertMessage = this.db.prepare(
@@ -1284,6 +1308,7 @@ export class CoworkStore {
         source.systemPrompt,
         source.modelOverride,
         source.thinkingLevel ?? '',
+        source.maxMode ? 1 : 0,
         source.executionMode,
         JSON.stringify(source.activeSkillIds),
         source.agentId,
@@ -1483,7 +1508,7 @@ export class CoworkStore {
     updates: Partial<
       Pick<
         CoworkSession,
-        'title' | 'claudeSessionId' | 'status' | 'cwd' | 'systemPrompt' | 'modelOverride' | 'thinkingLevel' | 'executionMode' | 'goal'
+        'title' | 'claudeSessionId' | 'status' | 'cwd' | 'systemPrompt' | 'modelOverride' | 'thinkingLevel' | 'maxMode' | 'executionMode' | 'goal'
       >
     >,
     options: { touchUpdatedAt?: boolean } = {},
@@ -1534,6 +1559,10 @@ export class CoworkStore {
     if (updates.thinkingLevel !== undefined) {
       setClauses.push('thinking_level = ?');
       values.push(updates.thinkingLevel);
+    }
+    if (updates.maxMode !== undefined) {
+      setClauses.push('max_mode = ?');
+      values.push(updates.maxMode ? 1 : 0);
     }
     if (updates.executionMode !== undefined) {
       setClauses.push('execution_mode = ?');
@@ -2514,6 +2543,7 @@ export class CoworkStore {
       'dreamingFrequency',
       'dreamingModel',
       'dreamingTimezone',
+      'autoModelRouting',
     ] as const;
     const configRows = this.getAll<{ key: string; value: string }>(
       `SELECT key, value FROM cowork_config WHERE key IN (${configKeys.map(() => '?').join(', ')})`,
@@ -2554,6 +2584,7 @@ export class CoworkStore {
       dreamingFrequency: cfg.get('dreamingFrequency') || DEFAULT_DREAMING_FREQUENCY,
       dreamingModel: cfg.get('dreamingModel') || DEFAULT_DREAMING_MODEL,
       dreamingTimezone: cfg.get('dreamingTimezone') || DEFAULT_DREAMING_TIMEZONE,
+      autoModelRouting: parseAutoModelRoutingConfig(cfg.get('autoModelRouting')),
     };
   }
 
@@ -2628,6 +2659,13 @@ export class CoworkStore {
     }
     if (config.dreamingTimezone !== undefined) {
       this.upsertConfig('dreamingTimezone', String(config.dreamingTimezone), now);
+    }
+    if (config.autoModelRouting !== undefined) {
+      this.upsertConfig(
+        'autoModelRouting',
+        JSON.stringify(normalizeAutoModelRoutingConfig(config.autoModelRouting)),
+        now,
+      );
     }
   }
 

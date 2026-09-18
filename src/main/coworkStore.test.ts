@@ -23,6 +23,10 @@ import BetterSqlite3 from 'better-sqlite3';
 import { CoworkSystemMessageKind } from '../common/coworkSystemMessages';
 import { AgentAvatarSvg, DefaultAgentAvatarIcon, encodeAgentAvatarIcon } from '../shared/agent/avatar';
 import {
+  COWORK_AUTO_MODEL_REF,
+  DEFAULT_COWORK_AUTO_MODEL_ROUTING_CONFIG,
+} from '../shared/cowork/autoModelRouting';
+import {
   COWORK_SEARCH_HISTORY_MAX_MESSAGE_CONTENT_CODE_UNITS,
   COWORK_SEARCH_MESSAGE_PAGE_MAX_CONTENT_BYTES,
   CoworkForkMode,
@@ -56,6 +60,7 @@ function setupDb(): void {
       system_prompt TEXT NOT NULL DEFAULT '',
       model_override TEXT NOT NULL DEFAULT '',
       thinking_level TEXT NOT NULL DEFAULT '',
+      max_mode INTEGER NOT NULL DEFAULT 0,
       execution_mode TEXT NOT NULL DEFAULT 'local',
       active_skill_ids TEXT,
       agent_id TEXT DEFAULT 'main',
@@ -952,6 +957,46 @@ test('create and update session persist the selected thinking level', () => {
   expect(store.getSession(session.id)?.thinkingLevel).toBe('max');
 });
 
+test('Max mode persists on create, update and fork without touching the model selection', () => {
+  const session = store.createSession(
+    'Max session',
+    '/tmp',
+    '',
+    'local',
+    [],
+    'main',
+    COWORK_AUTO_MODEL_REF,
+    { maxMode: true },
+  );
+  db.prepare('UPDATE cowork_sessions SET updated_at = ? WHERE id = ?').run(1000, session.id);
+
+  expect(session.maxMode).toBe(true);
+  expect(store.getSession(session.id)).toMatchObject({
+    maxMode: true,
+    modelOverride: COWORK_AUTO_MODEL_REF,
+  });
+
+  const fork = store.forkSession({ sourceSessionId: session.id });
+  expect(store.getSession(fork.id)).toMatchObject({
+    maxMode: true,
+    modelOverride: COWORK_AUTO_MODEL_REF,
+  });
+
+  store.updateSession(session.id, { maxMode: false }, { touchUpdatedAt: false });
+  expect(store.getSession(session.id)).toMatchObject({
+    maxMode: false,
+    modelOverride: COWORK_AUTO_MODEL_REF,
+    updatedAt: 1000,
+  });
+});
+
+test('sessions default to Max mode off', () => {
+  const sid = 'sess-max-default';
+  insertSession(sid);
+  expect(store.getSession(sid)?.maxMode).toBe(false);
+  expect(store.createSession('Plain', '/tmp').maxMode).toBe(false);
+});
+
 test('updateSession can rename without refreshing the session updated time', () => {
   const sid = 'sess-title-only';
   insertSession(sid);
@@ -1361,6 +1406,26 @@ test('persists skill review opt-in and opt-out independently of other settings',
     openClawSkillReviewEnabled: false,
     openClawHeartbeatEnabled: true,
   });
+});
+
+test('Auto/Max routing overrides default to automatic and round-trip normalized', () => {
+  expect(store.getConfig().autoModelRouting).toEqual(DEFAULT_COWORK_AUTO_MODEL_ROUTING_CONFIG);
+
+  store.setConfig({
+    autoModelRouting: {
+      ...DEFAULT_COWORK_AUTO_MODEL_ROUTING_CONFIG,
+      visionModel: ' openai/gpt-vision ',
+      maxModel: 'anthropic/claude-opus',
+    },
+  });
+  expect(new CoworkStore(db).getConfig().autoModelRouting).toEqual({
+    ...DEFAULT_COWORK_AUTO_MODEL_ROUTING_CONFIG,
+    visionModel: 'openai/gpt-vision',
+    maxModel: 'anthropic/claude-opus',
+  });
+
+  db.prepare("UPDATE cowork_config SET value = 'not json' WHERE key = 'autoModelRouting'").run();
+  expect(store.getConfig().autoModelRouting).toEqual(DEFAULT_COWORK_AUTO_MODEL_ROUTING_CONFIG);
 });
 
 test('defaults memory flush to disabled for users without the setting', () => {

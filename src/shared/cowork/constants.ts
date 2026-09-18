@@ -85,6 +85,11 @@ export const CoworkIpcChannel = {
   AbortBtw: 'cowork:session:abortBtw',
   SubmitSteer: 'cowork:session:submitSteer',
   SessionModelOverrideChanged: 'cowork:session:modelOverrideChanged',
+  // Display-only: the concrete model an Auto/Max turn resolved to. Unlike
+  // SessionModelOverrideChanged it never rewrites the stored selection.
+  SessionModelAutoResolved: 'cowork:session:modelAutoResolved',
+  // Per-session Max mode toggle.
+  SessionSetMaxMode: 'cowork:session:setMaxMode',
   SessionsChanged: 'cowork:sessions:changed',
   StreamBtwResult: 'cowork:stream:btwResult',
   StreamGoal: 'cowork:stream:goal',
