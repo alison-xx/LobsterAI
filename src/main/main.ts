@@ -10535,6 +10535,8 @@ if (!gotTheLock) {
   };
 
   registerAgentHandlers({
+    isEngineRunning: () => getOpenClawEngineManager().getStatus().phase === OpenClawEnginePhase.Running,
+    getAvailableSkillIds: async () => (await getSkillManager().listSkills()).filter(skill => skill.enabled).map(skill => skill.id),
     getAgentManager,
     getCoworkStore,
     getCoworkEngineRouter,

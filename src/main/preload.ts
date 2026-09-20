@@ -447,6 +447,8 @@ contextBridge.exposeInMainWorld('electron', {
     },
   },
   agents: {
+    installExpertTeam: (request: import('../shared/agent/teamInstallation').ExpertTeamInstallRequest) =>
+      ipcRenderer.invoke(AgentIpcChannel.InstallExpertTeam, request),
     list: async () => {
       const result = await ipcRenderer.invoke(AgentIpcChannel.List);
       return result?.success ? result.agents : [];
