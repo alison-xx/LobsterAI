@@ -2972,7 +2972,9 @@ const _syncOpenClawConfigImpl = async (
     return pending();
   }
   assertOwner();
-  const targetRevision = crypto.createHash('sha256').update(JSON.stringify([candidate.candidateRaw, nextSecrets])).digest('hex');
+  // The lease binds this serialized restart attempt, not a public hash of secrets.
+  // Reuse its opaque identity for acquire/commit; saved receipts attest application.
+  const targetRevision = crypto.randomUUID();
   let savedReceipt: ConfigDeliveryReceipt | undefined;
   const restarted = await manager.restartGateway(`config-sync:${options.reason}`, {
     gatewayGeneration: generation,
