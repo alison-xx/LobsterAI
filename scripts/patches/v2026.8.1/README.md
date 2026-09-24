@@ -1,5 +1,21 @@
 # OpenClaw v2026.8.1 patch notes
 
+## Native progress activity card
+
+`zz-openclaw-progress-card-activity.patch` adds optional `ifAbsent` to
+`progressCard.put`. Cowork uses it after observing two distinct tool starts to
+create a factual activity card when the agent has not supplied a native plan.
+The native SQLite transaction checks for an existing row before writing;
+both a populated card and a cleared-card tombstone prevent replacement.
+Ordinary agent updates and revision-aware dismissal retain their semantics.
+
+Verify upstream `src/session-cards/progress-card-store.test.ts` and
+`src/gateway/server-methods/progress-card.test.ts`, including native-plan races
+and cleared-card preservation. Rebuild the bundled runtime with the main/preload
+changes; renderer-only delivery is insufficient. Remove this patch when the
+pinned upstream protocol and store provide equivalent atomic create-if-absent
+semantics. See `docs/native-progress-card.md` for the client contract.
+
 ## Device identity conflicts without an import receipt
 
 `openclaw-device-identity-preservation.patch` aligns the identity migration owner
