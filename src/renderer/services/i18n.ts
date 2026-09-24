@@ -6,6 +6,16 @@ export type LanguageType = 'zh' | 'en';
 // 语言文本映射
 const translations: Record<LanguageType, Record<string, string>> = {
   zh: {
+    progressCardTitle: '任务进度',
+    progressCardJustNow: '刚刚',
+    progressCardMinutes: '{count} 分钟前',
+    progressCardUpdated: '已更新',
+    progressCardPosition: '{total} 中的 {current}',
+    progressCardDismiss: '关闭已完成的任务卡片',
+    progressCardPaused: '已暂停',
+    progressCardFailed: '失败',
+    progressCardUnavailable: '任务进度暂时无法更新',
+    progressCardRetry: '重试',
     subscriptionTrialTitlePrefix: '新用户专享',
     subscriptionTrialTitleSuffix: '解锁',
     subscriptionTrialCreditUnit: '积分！',
@@ -4079,6 +4089,16 @@ const translations: Record<LanguageType, Record<string, string>> = {
     workspaceDiffIncomplete: '部分文件超出读取限额，行数统计不完整。',
   },
   en: {
+    progressCardTitle: 'Task progress',
+    progressCardJustNow: 'just now',
+    progressCardMinutes: '{count} min ago',
+    progressCardUpdated: 'Updated',
+    progressCardPosition: '{current} of {total}',
+    progressCardDismiss: 'Dismiss completed progress card',
+    progressCardPaused: 'Paused',
+    progressCardFailed: 'Failed',
+    progressCardUnavailable: 'Task progress unavailable',
+    progressCardRetry: 'Retry',
     subscriptionTrialTitlePrefix: 'New users pay',
     subscriptionTrialTitleSuffix: 'to unlock',
     subscriptionTrialCreditUnit: 'credits!',
