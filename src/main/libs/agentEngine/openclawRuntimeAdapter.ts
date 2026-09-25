@@ -65,7 +65,7 @@ import {
   isPlanImplementationApproval,
   PLAN_MODE_EXECUTION_OVERRIDE_MARKER,
 } from '../../../shared/cowork/planMode';
-import { PROGRESS_CARD_TOOL_NAME,ProgressCardEvent } from '../../../shared/cowork/progressCard';
+import { ProgressCardEvent } from '../../../shared/cowork/progressCard';
 import {
   buildSelectedTextPromptSection,
   type CoworkSelectedTextSnippet,
@@ -707,10 +707,6 @@ const OpenClawHistoryRole = {
 } as const;
 
 type ActiveTurn = {
-  progressActivityToolIds?: Set<string>;
-  progressActivityPending?: boolean;
-  progressActivityAttempts?: number;
-  progressActivityCreated?: boolean;
   sessionId: string;
   sessionKey: string;
   runId: string;
@@ -3401,6 +3397,7 @@ export class OpenClawRuntimeAdapter extends EventEmitter implements CoworkRuntim
     changed: id => this.emit(ProgressCardEvent.Changed, id),
   });
   getProgressCard(sessionId: string) { return this.progressCards.get(sessionId); }
+  refreshProgressCard(sessionId: string, idempotencyKey: string) { return this.progressCards.refresh(sessionId, idempotencyKey); }
   dismissProgressCard(sessionId: string, revision: number) { return this.progressCards.dismiss(sessionId, revision); }
 
   async getContextUsage(sessionId: string): Promise<CoworkContextUsage | null> {
@@ -8973,26 +8970,6 @@ export class OpenClawRuntimeAdapter extends EventEmitter implements CoworkRuntim
         console.warn(`${browserEventSummary} failed.`);
       } else {
         console.debug(browserEventSummary);
-      }
-    }
-
-    if (phase === 'start' && isCurrentRun && !turn.stopRequested) {
-      const activityIds = (turn.progressActivityToolIds ??= new Set<string>());
-      if (toolNameRaw.toLowerCase() === PROGRESS_CARD_TOOL_NAME) {
-        // Once the model manages the card, its clear/update decisions are authoritative.
-        turn.progressActivityCreated = true;
-      } else {
-        activityIds.add(toolCallId);
-      }
-      if (activityIds.size >= 2 && !turn.progressActivityCreated && !turn.progressActivityPending
-        && (turn.progressActivityAttempts ?? 0) < 2) {
-        turn.progressActivityPending = true;
-        turn.progressActivityAttempts = (turn.progressActivityAttempts ?? 0) + 1;
-        const isActive = () => this.activeTurns.get(sessionId) === turn && !turn.stopRequested;
-        void this.progressCards.ensureActivity(sessionId, turn.sessionKey, t('coworkProgressActivityObserved'), isActive)
-          .then(() => { turn.progressActivityCreated = true; })
-          .catch(error => console.warn('[OpenClawRuntime] Could not create the activity card.', error))
-          .finally(() => { turn.progressActivityPending = false; });
       }
     }
 

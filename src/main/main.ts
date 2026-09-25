@@ -10541,6 +10541,18 @@ if (!gotTheLock) {
     }
   });
 
+  ipcMain.handle(CoworkIpcChannel.RefreshProgressCard, async (event, sessionId: string, idempotencyKey: string) => {
+    if (!mainWindow || event.sender !== mainWindow.webContents || event.senderFrame !== mainWindow.webContents.mainFrame) return { success: false, error: 'Untrusted sender' };
+    if (typeof sessionId !== 'string' || !getCoworkStore().getSession(sessionId)) return { success: false, error: 'Unknown session' };
+    try {
+      const receipt = await getCoworkEngineRouter().refreshProgressCard(sessionId, idempotencyKey);
+      return { success: true, receipt };
+    } catch (error) {
+      const details = (error as { details?: { code?: string } } | null)?.details;
+      return { success: false, error: 'Progress refresh unavailable', terminal: details?.code === 'PROGRESS_CARD_REFRESH_TERMINAL' };
+    }
+  });
+
   for (const channel of [CoworkIpcChannel.GetProgressCard, CoworkIpcChannel.DismissProgressCard]) {
     ipcMain.handle(channel, async (event, sessionId: string, revision?: number) => {
       if (!mainWindow || event.sender !== mainWindow.webContents || event.senderFrame !== mainWindow.webContents.mainFrame) return { success: false, error: 'Untrusted sender' };

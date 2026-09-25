@@ -2,8 +2,8 @@
 .openclaw-progress-card {
   container-type: inline-size;
   min-width: 0;
-  margin: 0 0 8px;
-  padding-bottom: 4px;
+  margin: 0 0 -10px;
+  padding-bottom: 14px;
   border: 1px solid var(--lobster-border);
   border-radius: 22px 22px 12px 12px;
   background: var(--lobster-surface);
@@ -47,3 +47,6 @@
   .openclaw-progress-card-meta { grid-column: 1 / -1; grid-row: 2; max-width: none; font-size: 11px; }
   .openclaw-progress-card-toggle > svg { grid-column: 2; grid-row: 1; }
 }
+
+.openclaw-progress-card [data-refresh] { display: inline-flex; align-items: center; gap: 4px; padding: 6px; border-radius: 6px; color: var(--lobster-text-secondary); }
+.openclaw-progress-card [data-refresh]:disabled { cursor: wait; }

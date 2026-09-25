@@ -6852,7 +6852,7 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
               })}
             />
           )}
-          <OpenClawProgressCard key={currentSession.id} sessionId={currentSession.id} running={currentSession.status === 'running'} failed={currentSession.status === 'error'} />
+          <OpenClawProgressCard key={currentSession.id} session={currentSession} />
           {showExternalGoalStatusBar && (
             <div className={`relative z-10 ${showExternalSteerPreview ? 'mb-1.5' : '-mb-px'}`}>
               <div ref={setGoalStatusBarPortalTarget} />

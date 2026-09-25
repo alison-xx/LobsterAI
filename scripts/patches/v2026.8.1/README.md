@@ -505,3 +505,14 @@ Verify with upstream `runtime-facts-prompt.test.ts`,
 while a background `exec` is running and that the gateway log no longer reports
 `[prompt-cache] cache read dropped` at run boundaries. Remove this patch when
 the pinned upstream includes `#140799`.
+
+## Progress card refresh
+
+`zzzz-openclaw-progress-card-refresh.patch` adds an operator-write `progressCard.refresh`
+RPC. A fixed hidden status request keeps the caller's authorization, restricts tools
+to status/reporting, and returns the original card revision as an idempotent receipt.
+User/assistant transcript display, session activity, and lifecycle projections stay
+hidden; stale completed sessions are not reset. Authorized `progress_card` remains
+directly available through tool catalog compaction, without bypassing policy denial.
+Includes Gateway authorization/retry/race tests, real SQLite session-init coverage,
+chat transcript/projection regressions, and catalog visibility tests.

@@ -4,7 +4,7 @@ Cowork displays the persisted OpenClaw progress card above the existing composer
 
 ## Data and interaction contract
 
-- The main process resolves a local Cowork session ID to its native session key. Narrow IPC exposes read, completed-card dismissal, and invalidation notifications; requests are restricted to the main window's main frame and a known local session.
+- The main process resolves a local Cowork session ID to its native session key. Narrow IPC exposes read, refresh, completed-card dismissal, and invalidation notifications; requests are restricted to the main window's main frame and a known local session.
 - `progressCard.get` reads native persistence on session entry and Gateway reconnection. `progressCard.changed` triggers a fresh read. Chat history is not used to reconstruct cards.
 - Card Markdown and step states remain authoritative. Markdown-only and steps-only cards are supported. Completion is never inferred from a stopped or failed turn.
 - New incomplete cards expand by default. Updates preserve the user's collapse choice. The compact heading uses the current step and its actual position. Long content scrolls internally; narrow layouts, dark themes, and reduced motion are supported.
@@ -14,20 +14,28 @@ Cowork displays the persisted OpenClaw progress card above the existing composer
 
 ## Creating progress during ordinary tasks
 
-Each outbound turn asks the agent to create and maintain a native plan for multi-action work. Prompting alone does not guarantee tool use. After two distinct tool starts in the current, non-stopped run, the adapter can create a factual Markdown-only activity card. It does not manufacture a goal, steps, completion, or percentage. Native `progress_card` activity takes ownership; historical, duplicate, and late events cannot create a fallback.
+Each outbound turn asks the agent to create and maintain a native plan for multi-action work. The authorized `progress_card` tool stays directly callable through tool-search/catalog compaction, with explicit policy denial preserved. Native card updates remain model-authored.
 
-The version-scoped patch `scripts/patches/v2026.8.1/zz-openclaw-progress-card-activity.patch` adds optional `ifAbsent` to `progressCard.put`. The check and write happen in the native SQLite transaction. Existing cards and cleared-card tombstones both win, preventing the fallback from overwriting a plan or resurrecting a dismissed card. The fallback is therefore not a new plan for every subsequent turn in an existing session: those plans remain the agent's responsibility.
+Before a native plan exists, the UI can derive a separate execution list from at least two recorded tool calls in the latest visible user turn. Successful final results, failures, active calls, and interrupted calls remain distinct. Historical pages and old host placeholders do not masquerade as current plans. No fallback card is written to Gateway persistence. The existing atomic `ifAbsent` write extension remains backward-compatible for other clients.
 
-No OpenClaw version upgrade or active refresh-task feature is introduced. Main, preload, and the patched bundled runtime must ship together in a full desktop release.
+## Active refresh
+
+The Refresh progress button retains the old card while `progressCard.refresh` asks for a status update. The version-scoped `zzzz-openclaw-progress-card-refresh.patch` adds this operator-write RPC under the original caller's session authorization. It dispatches a fixed hidden steer with reporting/read-only tools; it does not authorize resuming stopped work. User and assistant transcript display, activity, and lifecycle projections remain hidden, and session initialization preserves stale completed/cancelled sessions.
+
+The receipt carries the original revision and a stable request identity. A lost acknowledgment retries with the same identity; a terminal result allows a new explicit intent. The renderer waits for a higher revision or clear, polls every two seconds, and times out after 45 seconds without hiding the old card. Session/connection changes and late acknowledgments are guarded.
+
+Main, preload, and the patched bundled runtime must ship together in a full desktop release. No OpenClaw version upgrade is introduced.
 
 ## Validation
 
-- 302 targeted tests across the runtime adapter, main bridge, renderer subscription, component, and Markdown renderer.
-- 19 native progress store/Gateway tests on the clean pinned OpenClaw source with the new patch applied.
-- Changed-file ESLint with zero warnings; renderer and Electron TypeScript checks; production renderer build and Electron compilation.
-- An isolated Electron component fixture with invented task data verified collapse preservation after an update, stopped state, and a 390px dark layout without horizontal overflow. Screenshots below show the actual card component with a simplified composer fixture, not a live model session.
+- 338 desktop tests across the adapter, main bridge, renderer hook, components, Markdown, and patch inventory.
+- 273 pinned-runtime tests covering progress handlers, refresh identity/authorization races, real SQLite stale-session initialization, hidden provenance, chat dispatch/transcript behavior, and tool catalog visibility.
+- Changed-file ESLint with zero warnings; renderer and Electron TypeScript checks; production renderer build and Electron compilation. Runtime `tsgo:core`, typed lint, and formatting passed.
+- All 59 patches applied to clean OpenClaw `v2026.8.1`; a repeat application skipped all 59.
+- An isolated Electron fixture rendered the actual component, clicked Refresh, verified that the original steps remained while the button was disabled, and verified that a later revision settled the refresh without another request. The fixture uses invented task data and a mock Gateway bridge.
 
-Live model end-to-end behavior and packaged restart/reconnect acceptance still need upstream validation. Automated tests cover reconnect, session switching, reordered responses, empty cards, failure retention, and revision conflicts. The native patch was tested separately against the pinned source, not with the entire upstream patch stack.
+Live model end-to-end behavior, packaged restart/reconnect acceptance, and native Windows testing still need validation. Existing light/dark screenshots predate the refresh enhancement; the refresh screenshot below shows the current component fixture.
 
+![Refreshing card with the previous plan retained](images/native-progress-card-refresh.png)
 ![Expanded light card](images/native-progress-card-light.png)
 ![Stopped card in a narrow dark fixture](images/native-progress-card-dark-narrow.png)

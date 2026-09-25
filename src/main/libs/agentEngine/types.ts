@@ -166,6 +166,7 @@ export interface CoworkRuntime {
   runGoalCommand?(sessionId: string, command: string): Promise<CoworkGoal | null>;
   patchSession?(sessionId: string, patch: OpenClawSessionPatch): Promise<CoworkSessionPatchResult | void>;
   getProgressCard?(sessionId: string): Promise<OpenClawProgressCard | null>;
+  refreshProgressCard?(sessionId: string, idempotencyKey: string): Promise<import('../../../shared/cowork/progressCard').ProgressCardRefreshReceipt>;
   dismissProgressCard?(sessionId: string, revision: number): Promise<OpenClawProgressCard | null>;
   getContextUsage?(sessionId: string): Promise<CoworkContextUsage | null>;
   compactContext?(sessionId: string): Promise<{ compacted: boolean; reason?: string; usage?: CoworkContextUsage | null }>;

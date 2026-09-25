@@ -4,7 +4,6 @@ import path from 'node:path';
 
 import { expect, test, vi } from 'vitest';
 
-import { PROGRESS_CARD_TOOL_NAME } from '../../../shared/cowork/progressCard';
 
 vi.mock('electron', () => ({
   app: {
@@ -10805,36 +10804,19 @@ test('tool input_delta is ignored in plan mode and for stale runs', () => {
 });
 
 
-test('native progress activity counts distinct current-run tool starts only', async () => {
+test('tool activity does not persist a host-authored placeholder over native plans', () => {
   const { session, store } = createReconcileStore([]);
   const adapter = new OpenClawRuntimeAdapter(store, {});
   const key = `agent:main:lobsterai:${session.id}`;
   const turn = createActiveTurn(session.id, key, 'progress-run');
   adapter.activeTurns.set(session.id, turn);
-  const ensure = vi.spyOn(adapter.progressCards, 'ensureActivity').mockResolvedValue(undefined);
-  const event = (id: string, phase = 'start', run = turn.runId) => adapter.handleAgentToolEvent(session.id, turn,
-    { toolCallId: id, name: 'read', phase, args: { path: '/tmp/example' } }, run);
-  event('old', 'start', 'old-run'); event('one'); event('one'); event('one', 'result');
-  expect(ensure).not.toHaveBeenCalled();
-  event('two'); event('three');
-  expect(ensure).toHaveBeenCalledOnce();
-  expect(ensure.mock.calls[0][1]).toBe(key);
-  await Promise.resolve();
-  event('four');
-  expect(ensure).toHaveBeenCalledOnce();
-});
-
-test.each(['native', 'stop'])('activity fallback respects %s ownership', condition => {
-  const { session, store } = createReconcileStore([]);
-  const adapter = new OpenClawRuntimeAdapter(store, {});
-  const key = `agent:main:lobsterai:${session.id}`;
-  const turn = createActiveTurn(session.id, key, 'progress-run');
-  adapter.activeTurns.set(session.id, turn);
-  const ensure = vi.spyOn(adapter.progressCards, 'ensureActivity').mockResolvedValue(undefined);
-  if (condition === 'native') adapter.handleAgentToolEvent(session.id, turn,
-    { toolCallId: 'plan', name: PROGRESS_CARD_TOOL_NAME, phase: 'start', args: { markdown: 'Plan' } }, turn.runId);
-  else turn.stopRequested = true;
-  for (const id of ['one', 'two']) adapter.handleAgentToolEvent(session.id, turn,
+  const request = vi.fn();
+  adapter.progressCards = new Proxy(adapter.progressCards, { get(target, prop, receiver) {
+    if (prop === 'ensureActivity') return request;
+    return Reflect.get(target, prop, receiver);
+  } });
+  for (const id of ['one', 'two', 'three']) adapter.handleAgentToolEvent(session.id, turn,
     { toolCallId: id, name: 'read', phase: 'start', args: { path: '/tmp/example' } }, turn.runId);
-  expect(ensure).not.toHaveBeenCalled();
+  expect(request).not.toHaveBeenCalled();
+  expect(session.messages.filter(message => message.type === 'tool_use')).toHaveLength(3);
 });

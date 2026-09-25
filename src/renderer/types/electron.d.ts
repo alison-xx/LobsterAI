@@ -1087,6 +1087,7 @@ interface IElectronAPI {
       hasMore?: boolean;
       error?: string;
     }>;
+    refreshProgressCard: (sessionId: string, idempotencyKey: string) => Promise<import('../../shared/cowork/progressCard').ProgressCardRefreshResponse>;
     getProgressCard: (sessionId: string) => Promise<ProgressCardResponse>;
     dismissProgressCard: (sessionId: string, revision: number) => Promise<ProgressCardResponse>;
     onProgressCardChanged: (callback: (event: { sessionId: string }) => void) => () => void;

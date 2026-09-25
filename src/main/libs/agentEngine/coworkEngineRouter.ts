@@ -128,6 +128,10 @@ export class CoworkEngineRouter extends EventEmitter implements CoworkRuntime {
   }
 
   async getProgressCard(sessionId: string) { return this.runtime.getProgressCard?.(sessionId) ?? null; }
+  async refreshProgressCard(sessionId: string, idempotencyKey: string) {
+    if (!this.runtime.refreshProgressCard) throw new Error('Progress refresh unavailable');
+    return this.runtime.refreshProgressCard(sessionId, idempotencyKey);
+  }
   async dismissProgressCard(sessionId: string, revision: number) { return this.runtime.dismissProgressCard?.(sessionId, revision) ?? null; }
 
   async getContextUsage(sessionId: string): Promise<CoworkContextUsage | null> {

@@ -54,13 +54,25 @@ describe('native progress cards', () => {
   });
 });
 
-it('creates activity atomically and skips inactive or wrong segments', async () => {
+it('refreshes using a stable request identity and keeps its receipt separate from a card', async () => {
   const s = setup();
-  await s.controller.ensureActivity('local', card.sessionKey, 'Activity', () => true);
-  expect(s.request).toHaveBeenCalledExactlyOnceWith(ProgressCardGatewayMethod.Put, { sessionKey: card.sessionKey, markdown: 'Activity', ifAbsent: true });
-  expect(s.changed).toHaveBeenCalledWith('local');
-  await s.controller.ensureActivity('local', card.sessionKey, 'Activity', () => false);
-  s.switchKey();
-  await s.controller.ensureActivity('local', card.sessionKey, 'Activity', () => true);
-  expect(s.request).toHaveBeenCalledTimes(1);
+  const receipt = { runId: 'refresh-run', status: 'accepted', revision: 2 };
+  s.request.mockResolvedValue(receipt);
+  expect(await s.controller.refresh('local', 'refresh-key')).toEqual(receipt);
+  expect(s.request).toHaveBeenCalledWith(ProgressCardGatewayMethod.Refresh, { sessionKey: card.sessionKey, idempotencyKey: 'refresh-key' });
+  expect(s.changed).not.toHaveBeenCalled();
+});
+it.each(['reconnect', 'switchKey'] as const)('rejects a late refresh receipt after %s', async action => {
+  const s = setup();
+  let resolve!: (v: unknown) => void;
+  s.request.mockImplementationOnce(() => new Promise(r => { resolve = r; }));
+  const pending = s.controller.refresh('local', 'refresh-key');
+  s[action](); resolve({ runId: 'r', status: 'accepted', revision: 2 });
+  await expect(pending).rejects.toThrow('changed');
+});
+it('rejects malformed refresh receipts and keys', async () => {
+  const s = setup();
+  await expect(s.controller.refresh('local', '')).rejects.toThrow();
+  s.request.mockResolvedValue({ runId: 'r', status: 'completed', revision: 2 });
+  await expect(s.controller.refresh('local', 'key')).rejects.toThrow();
 });

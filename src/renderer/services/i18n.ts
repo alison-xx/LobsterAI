@@ -6,6 +6,12 @@ export type LanguageType = 'zh' | 'en';
 // 语言文本映射
 const translations: Record<LanguageType, Record<string, string>> = {
   zh: {
+    progressCardTurnEnded: '本轮已结束',
+    progressCardActivityTitle: '执行进度',
+    progressCardActivityHint: '以下为实际执行记录，任务计划提交后将在此显示。',
+    progressCardRefresh: '刷新进度',
+    progressCardRefreshing: '正在核对进度',
+    progressCardRefreshFailed: '刷新未完成，重试',
     progressCardTitle: '任务进度',
     progressCardJustNow: '刚刚',
     progressCardMinutes: '{count} 分钟前',
@@ -4089,6 +4095,12 @@ const translations: Record<LanguageType, Record<string, string>> = {
     workspaceDiffIncomplete: '部分文件超出读取限额，行数统计不完整。',
   },
   en: {
+    progressCardTurnEnded: 'Turn ended',
+    progressCardActivityTitle: 'Execution progress',
+    progressCardActivityHint: 'Recorded actions are shown below. The task plan will appear here when submitted.',
+    progressCardRefresh: 'Refresh progress',
+    progressCardRefreshing: 'Checking progress',
+    progressCardRefreshFailed: 'Refresh incomplete. Retry',
     progressCardTitle: 'Task progress',
     progressCardJustNow: 'just now',
     progressCardMinutes: '{count} min ago',

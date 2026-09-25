@@ -1,5 +1,5 @@
 import { ProgressCardGatewayMethod, ProgressCardStepStatus } from '../../../shared/cowork/progressCard';
-import { type OpenClawProgressCard,parseProgressCard } from '../../../shared/cowork/progressCard';
+import { type OpenClawProgressCard,parseProgressCard,parseProgressCardRefreshReceipt } from '../../../shared/cowork/progressCard';
 interface Client { request(method: string, params: Record<string, unknown>): Promise<unknown> }
 /** The Gateway owns persistence. This bridge only remembers local-to-native identities. */
 export class OpenClawProgressCards {
@@ -19,15 +19,14 @@ export class OpenClawProgressCards {
     this.assertCurrent(sessionId, key, client);
     return parseProgressCard(result, key);
   }
-  /** Called only after distinct tool starts in the active turn, never from history. */
-  async ensureActivity(sessionId: string, sessionKey: string, markdown: string, isActive: () => boolean): Promise<void> {
+  async refresh(sessionId: string, idempotencyKey: string) {
+    if (typeof idempotencyKey !== 'string' || !idempotencyKey.trim() || idempotencyKey.length > 200) throw new Error('Invalid refresh identity');
+    const key = this.deps.key(sessionId);
+    if (!key) throw new Error('Unknown progress card session');
     const client = this.deps.client();
-    if (!isActive() || this.deps.key(sessionId) !== sessionKey) return;
-    // The pinned runtime applies ifAbsent inside its SQLite write transaction. A
-    // get-then-put here would race with (and overwrite) the model's native plan.
-    await client.request(ProgressCardGatewayMethod.Put, { sessionKey, markdown, ifAbsent: true });
-    this.assertCurrent(sessionId, sessionKey, client);
-    if (isActive()) this.deps.changed(sessionId);
+    const result = await client.request(ProgressCardGatewayMethod.Refresh, { sessionKey: key, idempotencyKey });
+    this.assertCurrent(sessionId, key, client);
+    return parseProgressCardRefreshReceipt(result);
   }
   async dismiss(sessionId: string, expectedRevision: number): Promise<OpenClawProgressCard | null> {
     if (!Number.isSafeInteger(expectedRevision) || expectedRevision < 1) throw new Error('Invalid revision');
