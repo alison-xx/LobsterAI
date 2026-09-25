@@ -30,7 +30,7 @@ Main, preload, and the patched bundled runtime must ship together in a full desk
 
 - 338 desktop tests across the adapter, main bridge, renderer hook, components, Markdown, and patch inventory.
 - 273 pinned-runtime tests covering progress handlers, refresh identity/authorization races, real SQLite stale-session initialization, hidden provenance, chat dispatch/transcript behavior, and tool catalog visibility.
-- Changed-file ESLint with zero warnings; renderer and Electron TypeScript checks; production renderer build and Electron compilation. Runtime `tsgo:core`, typed lint, and formatting passed.
+- Changed-file ESLint with zero warnings; renderer and Electron TypeScript checks; production renderer build and Electron compilation. Runtime `tsgo:core` and typed lint passed.
 - All 59 patches applied to clean OpenClaw `v2026.8.1`; a repeat application skipped all 59.
 - An isolated Electron fixture rendered the actual component, clicked Refresh, verified that the original steps remained while the button was disabled, and verified that a later revision settled the refresh without another request. The fixture uses invented task data and a mock Gateway bridge.
 

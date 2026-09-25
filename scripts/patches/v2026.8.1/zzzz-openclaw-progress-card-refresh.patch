@@ -286,36 +286,15 @@ index ebb4ad54..d7299014 100644
      sessionId: admittedSessionId,
      lifecycleGeneration,
 diff --git a/src/gateway/server-methods/chat-send-agent-dispatch.ts b/src/gateway/server-methods/chat-send-agent-dispatch.ts
-index 4acef61c..686300fe 100644
+index 4acef61c..9793c069 100644
 --- a/src/gateway/server-methods/chat-send-agent-dispatch.ts
 +++ b/src/gateway/server-methods/chat-send-agent-dispatch.ts
-@@ -11,6 +11,7 @@ import { dispatchInboundMessageWithProjectedDispatcher } from "../../auto-reply/
- import type { ReplyDispatchRun } from "../../auto-reply/get-reply-options.types.js";
- import type { ReplyMessageInjectionAttempt } from "../../auto-reply/reply/reply-run-registry.js";
- import { readAgentRunTerminalOutcome } from "../../channels/turn/agent-run-terminal-outcome.js";
-+import type { PrepareAssistantTranscriptMessage } from "../../config/sessions/transcript-assistant-delivery.js";
- import { measureDiagnosticsTimelineSpan } from "../../infra/diagnostics-timeline.js";
- import type { SkillWorkshopProposalRevisionConstraint } from "../../skills/workshop/types.js";
- import { isOperatorUiClient } from "../../utils/message-channel.js";
-@@ -43,12 +44,12 @@ import type { PreparedChatSendSession } from "./chat-send-session.js";
- import { finalizeChatSendSourceReplies } from "./chat-send-source-finalization.js";
- import { createChatSendTurnAdoptionLifecycle } from "./chat-send-turn-adoption.js";
- import { applyChatSendManagedMedia, type prepareChatSendUserTurn } from "./chat-send-user-turn.js";
--import { normalizeOptionalChatText as normalizeOptionalText } from "./chat-text-normalization.js";
- import {
-   emitOperatorChatSendServerTiming,
-   roundedChatSendTimingMs,
-   type ChatSendServerTimingPhase,
- } from "./chat-server-timing.js";
-+import { normalizeOptionalChatText as normalizeOptionalText } from "./chat-text-normalization.js";
- import type { createGatewayChatUserTurnController } from "./chat-user-turn-recorder.js";
- import { emitSessionsChanged } from "./session-change-event.js";
- import { prepareSessionWorkspace } from "./session-create-project.js";
-@@ -66,6 +67,7 @@ type StartChatDispatchParams = {
+@@ -66,6 +66,8 @@ type StartChatDispatchParams = {
    client: GatewayRequestHandlerOptions["client"];
    context: GatewayRequestHandlerOptions["context"];
    toolsAllow?: string[];
-+  prepareAssistantTranscriptMessage?: PrepareAssistantTranscriptMessage;
++  prepareAssistantTranscriptMessage?:
++    import("../../config/sessions/transcript-assistant-delivery.js").PrepareAssistantTranscriptMessage;
    skillWorkshopProposalRevision?: SkillWorkshopProposalRevisionConstraint;
    cronCreatorAuthority: ReturnType<ChatSendExternalAuthorityAdmission["resolve"]>;
    externalAuthorityAdmission: ChatSendExternalAuthorityAdmission | undefined;
