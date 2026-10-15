@@ -39,6 +39,7 @@ export const mcpRegistry: McpRegistryEntry[] = [
     command: 'https://web.lynxce.cn/api/mcp',
     defaultArgs: [],
     auth: McpAuthMode.OAuth,
+    skillId: 'lynxce-omni',
     marketplacePosition: 5,
   },
 ];

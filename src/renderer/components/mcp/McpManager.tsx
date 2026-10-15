@@ -15,8 +15,10 @@ import {
   McpInstalledItem,
   mergeMarketplaceRegistry,
 } from '../../services/mcpRegistryPresentation';
+import { skillService } from '../../services/skill';
 import { RootState } from '../../store';
 import { setMcpServers } from '../../store/slices/mcpSlice';
+import { setSkills } from '../../store/slices/skillSlice';
 import { McpMarketplaceCategoryInfo,McpRegistryEntry, McpServerConfig, McpServerFormData } from '../../types/mcp';
 import { CARD_ACTION_PILL_CLASS, DETAIL_ACTION_PILL_CLASS } from '../common/actionPillStyles';
 import CardOverflowMenu, { type CardOverflowMenuItem } from '../common/CardOverflowMenu';
@@ -732,6 +734,16 @@ const McpManager: React.FC = () => {
     setIsFormOpen(true);
   };
 
+  /** Turns on the bundled skill that explains the entry's tools; failing to do so never blocks connecting. */
+  const enableRegistryCompanionSkill = async (skillId: string) => {
+    try {
+      const skills = await skillService.setSkillEnabled(skillId, true);
+      dispatch(setSkills(skills));
+    } catch (error) {
+      console.warn(`[MCP] failed to enable companion skill "${skillId}":`, error);
+    }
+  };
+
   /**
    * MCP OAuth entries have nothing to fill in, so installing adds the server
    * right away (under the entry id, which keeps the OpenClaw server key stable)
@@ -768,6 +780,9 @@ const McpManager: React.FC = () => {
           dispatch(setMcpServers(result.servers));
         }
         server = result.servers?.find(item => item.registryId === entry.id);
+        if (server && entry.skillId) {
+          await enableRegistryCompanionSkill(entry.skillId);
+        }
       }
       if (server) {
         await handleOAuthSignIn(server);

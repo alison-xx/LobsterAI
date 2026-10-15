@@ -94,6 +94,7 @@ export interface McpRegistryEntry {
   argPlaceholders?: string[];    // placeholder hints for args (e.g. path)
   oauthProvider?: 'qichacha';    // special app-managed OAuth/API key flow
   auth?: McpAuthMode;            // remote entry that signs in with MCP OAuth; `command` holds its URL
+  skillId?: string;              // bundled skill that teaches the agent this server's tools; enabled on connect
   kind?: McpRegistryEntryKind;   // defaults to a single-server registry entry
   marketplacePosition?: number;  // 1-based preferred position; clamps to the available list
 }
