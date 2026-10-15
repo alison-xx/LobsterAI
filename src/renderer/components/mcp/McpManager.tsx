@@ -11,6 +11,7 @@ import {
   buildInstalledMcpItems,
   getRegistryEntryDisplayName,
   getRegistryEntryLocalizedDescription,
+  isOAuthRegistryEntry,
   McpInstalledItem,
   mergeMarketplaceRegistry,
 } from '../../services/mcpRegistryPresentation';
@@ -58,6 +59,17 @@ const isQichachaRegistryEntry = (entry: McpRegistryEntry): boolean =>
 
 const isOAuthRemoteServer = (server: McpServerConfig): boolean =>
   server.transportType !== 'stdio' && server.auth === McpAuthMode.OAuth;
+
+/** Marketplace action label: app-managed sign-in flows say so instead of "Install". */
+const getRegistryInstallLabel = (entry: McpRegistryEntry, isConnecting: boolean): string => {
+  if (isOAuthRegistryEntry(entry)) {
+    return i18nService.t(isConnecting ? 'mcpOAuthSigningIn' : 'mcpOAuthConnect');
+  }
+  if (isQichachaRegistryEntry(entry)) {
+    return i18nService.t(isConnecting ? 'mcpQichachaConnecting' : 'mcpQichachaConnect');
+  }
+  return i18nService.t('mcpInstall');
+};
 
 const OAUTH_ERROR_MESSAGE_KEYS: Partial<Record<McpOAuthErrorCode, string>> = {
   [McpOAuthErrorCode.AlreadyInProgress]: 'mcpOAuthSignInInProgress',
@@ -678,6 +690,10 @@ const McpManager: React.FC = () => {
       activeCategory,
       ...getRegistryAnalyticsParams(entry),
     });
+    if (isOAuthRegistryEntry(entry)) {
+      void handleConnectOAuthRegistry(entry);
+      return;
+    }
     if (isQichachaRegistryEntry(entry)) {
       setActionError('');
       setConnectingRegistryId(entry.id);
@@ -714,6 +730,51 @@ const McpManager: React.FC = () => {
     setEditingServer(null);
     setInstallingRegistry(entry);
     setIsFormOpen(true);
+  };
+
+  /**
+   * MCP OAuth entries have nothing to fill in, so installing adds the server
+   * right away (under the entry id, which keeps the OpenClaw server key stable)
+   * and starts the sign-in.
+   */
+  const handleConnectOAuthRegistry = async (entry: McpRegistryEntry) => {
+    setActionError('');
+    setConnectingRegistryId(entry.id);
+    try {
+      let server = servers.find(item => item.registryId === entry.id);
+      if (!server) {
+        const result = await mcpService.createServer({
+          name: entry.id,
+          description: getRegistryEntryDescription(entry),
+          transportType: entry.transportType,
+          url: entry.command,
+          auth: McpAuthMode.OAuth,
+          isBuiltIn: true,
+          registryId: entry.id,
+        });
+        if (!result.success) {
+          setActionError(result.error || i18nService.t('mcpCreateFailed'));
+          reportMcpAction('oauth_connect_failed', {
+            source: 'mcp_manager',
+            activeTab,
+            activeCategory,
+            result: 'failed',
+            errorCode: 'create_failed',
+            ...getRegistryAnalyticsParams(entry),
+          });
+          return;
+        }
+        if (result.servers) {
+          dispatch(setMcpServers(result.servers));
+        }
+        server = result.servers?.find(item => item.registryId === entry.id);
+      }
+      if (server) {
+        await handleOAuthSignIn(server);
+      }
+    } finally {
+      setConnectingRegistryId(null);
+    }
   };
 
   const handleCloseForm = () => {
@@ -1182,6 +1243,7 @@ const McpManager: React.FC = () => {
     const isInstalled = installedRegistryIds.has(entry.id);
     const isQichacha = isQichachaRegistryEntry(entry);
     const isConnecting = connectingRegistryId === entry.id;
+    const installLabel = getRegistryInstallLabel(entry, isConnecting);
     const installedServers = servers.filter(server => server.registryId === entry.id);
     const stats: McpDetailStat[] = [
       { label: i18nService.t('mcpDetailCategory'), value: getCategoryLabel(entry) },
@@ -1240,11 +1302,7 @@ const McpManager: React.FC = () => {
             disabled={isConnecting}
             className={DETAIL_ACTION_PILL_CLASS}
           >
-            {isQichacha
-              ? (isConnecting
-                ? i18nService.t('mcpQichachaConnecting')
-                : i18nService.t('mcpQichachaConnect'))
-              : i18nService.t('mcpInstall')}
+            {installLabel}
           </button>
         )}
         footer={isInstalled && installedServers.length > 0 ? (
@@ -1567,6 +1625,7 @@ const McpManager: React.FC = () => {
                 const isInstalled = installedRegistryIds.has(entry.id);
                 const isQichacha = isQichachaRegistryEntry(entry);
                 const isConnecting = connectingRegistryId === entry.id;
+                const installLabel = getRegistryInstallLabel(entry, isConnecting);
                 const requiredEnvKeyCount = entry.requiredEnvKeys?.length ?? 0;
                 return (
                   <McpCard
@@ -1588,11 +1647,7 @@ const McpManager: React.FC = () => {
                         disabled={isConnecting}
                         className={CARD_ACTION_PILL_CLASS}
                       >
-                        {isQichacha
-                          ? (isConnecting
-                            ? i18nService.t('mcpQichachaConnecting')
-                            : i18nService.t('mcpQichachaConnect'))
-                          : i18nService.t('mcpInstall')}
+                        {installLabel}
                       </button>
                     )}
                     meta={(

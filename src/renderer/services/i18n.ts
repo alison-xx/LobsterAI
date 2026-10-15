@@ -3157,6 +3157,7 @@ const translations: Record<LanguageType, Record<string, string>> = {
     mcpAuthOAuth: 'OAuth 登录',
     mcpAuthOAuthDesc: '保存后在卡片上点「登录」，在浏览器里授权该服务的账号，无需填写密钥',
     mcpToolsNeedOAuthSignIn: 'OAuth 服务需要先登录，保存后在卡片上点「登录」再查看工具',
+    mcpOAuthConnect: '连接并登录',
     mcpOAuthSignIn: '登录',
     mcpOAuthSigningIn: '等待浏览器授权…',
     mcpOAuthSignedIn: '已登录',
@@ -3294,6 +3295,8 @@ const translations: Record<LanguageType, Record<string, string>> = {
     mcpCategoryDataApi: '数据 & API',
     mcpDesc_qichacha:
       '通过企查查账号授权，自动配置企业工商、风险、知识产权、经营、人员和历史存档 MCP 服务',
+    mcpDesc_lynxceOmni:
+      '一句话出图、做视频、修图、写歌：海报、商品主图、短视频、配乐一站搞定。登录灵策账号授权即可使用，按账号积分计费，无需填写密钥',
 
     // 邮箱技能配置
     emailTab: '邮箱',
@@ -7809,6 +7812,7 @@ const translations: Record<LanguageType, Record<string, string>> = {
     mcpAuthOAuth: 'OAuth sign-in',
     mcpAuthOAuthDesc: 'After saving, click "Sign in" on the card and authorize your account in the browser. No keys to paste.',
     mcpToolsNeedOAuthSignIn: 'OAuth servers need sign-in first. Save, then click "Sign in" on the card to load tools.',
+    mcpOAuthConnect: 'Connect',
     mcpOAuthSignIn: 'Sign in',
     mcpOAuthSigningIn: 'Waiting for browser…',
     mcpOAuthSignedIn: 'Signed in',
@@ -7946,6 +7950,8 @@ const translations: Record<LanguageType, Record<string, string>> = {
     mcpCategoryDataApi: 'Data & API',
     mcpDesc_qichacha:
       'Authorize with a Qichacha account to configure company, risk, IP, operation, executive and history MCP servers automatically',
+    mcpDesc_lynxceOmni:
+      'Create images and videos, edit photos and compose music from a single sentence: posters, product shots, short videos and soundtracks. Sign in with a Lynxce account to use it; usage is billed to the account\'s credits, no API key needed',
 
     // Email Skill Config
     emailTab: 'Email',
